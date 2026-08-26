@@ -118,7 +118,11 @@ plan_build() {
 
 	targets=$(plan_selected_targets) || return 2
 	plan_apply_pins || return 2
-	disc_index_load || true
+	if [ "$GRAFT_RESCAN" = 1 ]; then
+		disc_index_load --rescan || true
+	else
+		disc_index_load || true
+	fi
 
 	while IFS= read -r t; do
 		[ -n "$t" ] || continue
@@ -219,6 +223,7 @@ plan_render_json_line() {
 plan_is_change() {
 	case "$1" in
 	absent | repair | backup-dir | backup-file) return 0 ;;
+	foreign) [ "$GRAFT_FORCE" = 1 ] && return 0 ;;
 	esac
 	return 1
 }
@@ -226,7 +231,13 @@ plan_is_change() {
 # Actions the user has to do something about.
 plan_is_problem() {
 	case "$1" in
-	foreign | tracked | mountpoint | missing-source | ambiguous) return 0 ;;
+	# With --force a foreign symlink is a change to make, not a problem to
+	# report. Tracked paths stay a problem no matter what (invariant I5).
+	foreign)
+		[ "$GRAFT_FORCE" = 1 ] && return 1
+		return 0
+		;;
+	tracked | mountpoint | missing-source | ambiguous) return 0 ;;
 	no-checkout) [ "$2" = yes ] && return 0 ;;
 	esac
 	return 1
@@ -290,8 +301,12 @@ plan_cmd_link() {
 	# one line. A tool that is chatty when idle trains people to stop reading it,
 	# and then they miss the run that mattered.
 	if [ "$PLAN_N_CHANGE" = 0 ] && [ "$PLAN_N_PROBLEM" = 0 ]; then
-		[ "$GRAFT_JSON" = 1 ] && plan_render
-		gr_say "$C_GREEN$G_OK$C_RESET $PLAN_N_OK links up to date, nothing to do"
+		if [ "$GRAFT_JSON" = 1 ]; then
+			plan_render
+			plan_summary_line "did"
+		else
+			gr_say "$C_GREEN$G_OK$C_RESET $(gr_plural "$PLAN_N_OK" "link is" "links are") up to date, nothing to do"
+		fi
 		return 0
 	fi
 
@@ -314,10 +329,13 @@ plan_cmd_link() {
 	plan_counts
 	if [ "$PLAN_SHOWN" = 1 ] && [ "$GRAFT_JSON" != 1 ]; then
 		gr_say ""
-		gr_ok "$PLAN_R_DONE link(s) in place"
+		gr_ok "$(gr_plural "$PLAN_R_DONE" "link in place" "links in place")"
 	fi
 	plan_summary_line "did"
 	plan_print_setup_notes
+	# A link that failed while being applied is drift too. Reporting success
+	# because the *plan* had no problems would be a lie about the disk.
+	[ "$PLAN_R_FAILED" -gt 0 ] && return "$GRAFT_EX_DRIFT"
 	[ "$PLAN_N_PROBLEM" -gt 0 ] && return "$GRAFT_EX_DRIFT"
 	return 0
 }
@@ -350,7 +368,7 @@ plan_execute() {
 		backup=$(cfg_target_get "$t" backup timestamp)
 		exclude=$(cfg_target_get "$t" git_exclude yes)
 		foreign=$(cfg_target_get "$t" on_foreign_link warn)
-		[ "$GRAFT_FORCE" = 1 ] && foreign=replace
+		[ "$GRAFT_FORCE" = 1 ] && foreign=force
 
 		# Called directly, not through $(...): a command substitution would run
 		# ap_link in a subshell and throw away every state record it writes.
@@ -424,8 +442,14 @@ plan_cmd_status() {
 	return 0
 }
 
+plan_unlink_json() {
+	printf '{"target":"%s","dest":"%s","result":"%s","status":"%s"}\n' \
+		"$(gr_json_escape "$1")" "$(gr_json_escape "$2")" \
+		"$(gr_json_escape "$3")" "$(gr_json_escape "$4")"
+}
+
 plan_cmd_unlink() {
-	local rec targets t where n=0
+	local rec targets t where dest n=0
 	targets=$(plan_selected_targets) || return "$GRAFT_EX_USAGE"
 	st_load
 	while IFS= read -r t; do
@@ -433,26 +457,35 @@ plan_cmd_unlink() {
 		while IFS= read -r rec; do
 			[ -n "$rec" ] || continue
 			if [ "$GRAFT_DRY_RUN" = 1 ]; then
-				gr_skip "would remove $(gr_clean "$(plan_short_path "$(plan_field "$rec" 3)")")"
+				dest=$(plan_field "$rec" 3)
+				if [ "$GRAFT_JSON" = 1 ]; then
+					plan_unlink_json "$t" "$dest" would-remove ok
+				else
+					gr_skip "would remove $(gr_clean "$(plan_short_path "$dest")")"
+				fi
 				n=$((n + 1))
 				continue
 			fi
 			# Direct call, stdout discarded: same subshell trap as ap_link.
 			AP_RESULT=""
-			where=$(gr_clean "$(plan_short_path "$(plan_field "$rec" 3)")")
+			dest=$(plan_field "$rec" 3)
+			where=$(gr_clean "$(plan_short_path "$dest")")
 			if ap_unlink_record "$rec" >/dev/null; then
 				case "$AP_RESULT" in
-				restored)
-					gr_ok "$where  link removed, backup restored"
-					n=$((n + 1))
-					;;
-				removed)
-					gr_ok "$where  link removed"
-					n=$((n + 1))
-					;;
-				already-gone) gr_skip "$where  was already gone" ;;
-				*) gr_skip "$where  $AP_RESULT" ;;
+				restored | removed) n=$((n + 1)) ;;
 				esac
+				if [ "$GRAFT_JSON" = 1 ]; then
+					plan_unlink_json "$t" "$dest" "$AP_RESULT" ok
+				else
+					case "$AP_RESULT" in
+					restored) gr_ok "$where  link removed, backup restored" ;;
+					removed) gr_ok "$where  link removed" ;;
+					already-gone) gr_skip "$where  was already gone" ;;
+					*) gr_skip "$where  $AP_RESULT" ;;
+					esac
+				fi
+			elif [ "$GRAFT_JSON" = 1 ]; then
+				plan_unlink_json "$t" "$dest" "$AP_RESULT" kept
 			else
 				gr_warn "$where  left alone ($AP_RESULT)"
 			fi
@@ -463,13 +496,25 @@ EOF
 $targets
 EOF
 	[ "$GRAFT_DRY_RUN" = 1 ] || st_save
-	gr_say "$n link(s) removed"
+	if [ "$GRAFT_JSON" = 1 ]; then
+		printf '{"summary":{"removed":%s}}\n' "$n"
+	else
+		gr_say "$(gr_plural "$n" "link removed" "links removed")"
+	fi
 	return 0
 }
 
 plan_cmd_adopt() {
-	local dir name src
-	dir=$(printf '%s' "$GRAFT_ARGS" | grep -v '^$' | head -1 || true)
+	local dir name src line
+	# No pipe: see the note in lib/discover.sh about grep/head under pipefail.
+	dir=""
+	while IFS= read -r line; do
+		[ -n "$line" ] || continue
+		dir="$line"
+		break
+	done <<EOF
+$GRAFT_ARGS
+EOF
 	name="$GRAFT_ADOPT_AS"
 	[ -n "$dir" ] || gr_die "$GRAFT_EX_USAGE" "adopt needs a directory: graft adopt <dir> --as NAME"
 	[ -n "$name" ] || gr_die "$GRAFT_EX_USAGE" "adopt needs --as NAME"

@@ -216,10 +216,13 @@ graft_need_config() {
 # --- commands -----------------------------------------------------------------
 
 cmd_check() {
+	local nt ns
 	graft_need_config
+	nt=$(cfg_targets | grep -c . || true)
+	ns=$(cfg_setups | grep -c . || true)
 	gr_say "graft.conf: $(gr_clean "$CFG_FILE")"
 	gr_ok "syntax and schema are valid"
-	gr_dim "  $(cfg_targets | grep -c . || true) targets, $(cfg_setups | grep -c . || true) setup notes"
+	gr_dim "  $(gr_plural "$nt" target targets), $(gr_plural "$ns" "setup note" "setup notes")"
 	return 0
 }
 

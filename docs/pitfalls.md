@@ -94,3 +94,31 @@ never nests, and a non-atomic window is a far smaller problem than a link
 silently landing inside the shared context repo.
 
 Test: `link: replacing a directory symlink does not nest (mv -T and fallback)`
+
+## P8 - `producer | grep -q` under `set -o pipefail`
+
+`bin/graft` runs with `set -euo pipefail`. Under it, this line is wrong:
+
+```sh
+cfg_targets | grep -qx -F -- "$name"      # 0 on match... usually
+```
+
+`grep -q` exits as soon as it matches. The producer on the left then writes into
+a closed pipe, dies of SIGPIPE (141), and `pipefail` reports the *rightmost
+non-zero* status - so a successful match is reported as a failure. Whether it
+fires depends on how much the producer still had to write, which is why it looks
+like a heisenbug: in the real case it failed for every target *except the last
+one defined*, and the error message helpfully suggested the exact name it had
+just rejected.
+
+It was invisible in the test suite because bats does not enable `pipefail`, but
+`bin/graft` does. Any test that only sources `lib/` therefore runs under
+different shell options than production.
+
+Guard, in order of preference:
+1. do not pipe at all - loop in bash, or use a here-string (`grep -q … <<<"$s"`)
+2. where a pipe is unavoidable, make the producer finite and read it fully
+   (`grep -c`, `wc -l`), never a short-circuiting consumer (`grep -q`, `head -n`)
+
+Test: the config suite enables `pipefail` explicitly in the regression cases, and
+`tests/integration.bats` exercises the real binary, which always has it on.

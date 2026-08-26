@@ -4,8 +4,10 @@
 # discover.bats - checkout discovery and its cache (SPEC 4.4, 3, 9.2).
 #
 # lib/config.sh is deliberately NOT sourced here. Discovery only ever calls the
-# three readers named in the module contract, so stubbing them keeps this suite
-# runnable, fast and independent of the INI parser.
+# readers named in the module contract, so stubbing them keeps this suite
+# runnable, fast and independent of the INI parser. The stubs use the one
+# section encoding config.sh documents - `target:<name>` - because that is the
+# contract; there is no second spelling to be tolerant about.
 
 # shellcheck source-path=SCRIPTDIR
 
@@ -56,13 +58,15 @@ cfg_get_all() {
 
 cfg_target_get() {
 	local t="$1" key="$2" def="${3:-}" v
-	v=$(cfg_get_all "target \"$t\"" "$key" | tail -n 1)
+	v=$(cfg_get_all "target:$t" "$key" | tail -n 1)
 	[ -n "$v" ] || v=$(cfg_get_all defaults "$key" | tail -n 1)
 	[ -n "$v" ] || v="$def"
 	printf '%s\n' "$v"
 }
 
-cfg_target_finds() { cfg_get_all "target \"$1\"" find; }
+cfg_target_finds() { cfg_get_all "target:$1" find; }
+
+cfg_target_verifies() { cfg_get_all "target:$1" verify; }
 
 # --- helpers -----------------------------------------------------------------
 
@@ -86,6 +90,70 @@ resolve() {
 
 rowcount() {
 	if [ -z "$DISC_ROWS" ]; then printf '0'; else printf '%s\n' "$DISC_ROWS" | wc -l | tr -d ' '; fi
+}
+
+# --- origin URL normalisation ------------------------------------------------
+#
+# Every origin comparison goes through disc__norm_url_into first, so one glob
+# has to fit both clone forms of the same repository. scp-style shorthand puts
+# a colon where every other form has a slash; a URL with a scheme must keep its
+# colon, because there it is a port.
+
+@test "norm url: scp-style ssh shorthand becomes a slash path" {
+	run disc__norm_url 'git@github.com:acme/api.git'
+	assert_status 0
+	[ "$output" = 'git@github.com/acme/api' ]
+}
+
+@test "norm url: an https URL only loses its .git and trailing slash" {
+	run disc__norm_url 'https://github.com/acme/api.git'
+	assert_status 0
+	[ "$output" = 'https://github.com/acme/api' ]
+
+	run disc__norm_url 'https://github.com/acme/api/'
+	[ "$output" = 'https://github.com/acme/api' ]
+}
+
+@test "norm url: a port in ssh://host:22/path is not a shorthand colon" {
+	run disc__norm_url 'ssh://git@host:22/acme/api.git'
+	assert_status 0
+	[ "$output" = 'ssh://git@host:22/acme/api' ]
+
+	run disc__norm_url 'ssh://git@host/acme/api'
+	[ "$output" = 'ssh://git@host/acme/api' ]
+}
+
+@test "norm url: scp-style with an absolute path does not double the slash" {
+	run disc__norm_url 'git@host:/srv/git/acme/api.git'
+	assert_status 0
+	[ "$output" = 'git@host/srv/git/acme/api' ]
+}
+
+@test "norm url: a local path without a scheme is left alone" {
+	run disc__norm_url '/home/me/repos/api'
+	assert_status 0
+	[ "$output" = '/home/me/repos/api' ]
+
+	run disc__norm_url '/srv/git/api.git'
+	[ "$output" = '/srv/git/api' ]
+}
+
+@test "find origin: */acme/api matches the ssh clone of the repo" {
+	mkrepo "$SANDBOX/work/api" "git@github.com:acme/api.git"
+	cfg_set 'target:api' find 'origin:*/acme/api'
+
+	resolve api
+	[ "$RC" -eq 0 ]
+	[ "$OUT" = "$SANDBOX/work/api" ]
+}
+
+@test "find origin: the same */acme/api matches the https clone too" {
+	mkrepo "$SANDBOX/work/api" "https://github.com/acme/api.git"
+	cfg_set 'target:api' find 'origin:*/acme/api'
+
+	resolve api
+	[ "$RC" -eq 0 ]
+	[ "$OUT" = "$SANDBOX/work/api" ]
 }
 
 # --- the scan ----------------------------------------------------------------
@@ -153,7 +221,7 @@ rowcount() {
 
 	disc_index_build
 
-	cfg_set 'target "u"' find 'origin:*acme/uber'
+	cfg_set 'target:u' find 'origin:*acme/uber'
 	resolve u
 	[ "$RC" -eq 0 ]
 	[ "$OUT" = "$SANDBOX/work/mein projekt/über api" ]
@@ -197,7 +265,7 @@ rowcount() {
 
 @test "index: a resolve answered from the cache does not rescan" {
 	mkrepo "$SANDBOX/work/api" "git@github.com:acme/api.git"
-	cfg_set 'target "api"' find 'origin:*acme/api'
+	cfg_set 'target:api' find 'origin:*acme/api'
 	disc_index_build
 
 	fresh_run
@@ -213,7 +281,7 @@ rowcount() {
 
 @test "find path: takes the directory as given" {
 	mkdir -p "$SANDBOX/elsewhere/api"
-	cfg_set 'target "api"' find "path:$SANDBOX/elsewhere/api"
+	cfg_set 'target:api' find "path:$SANDBOX/elsewhere/api"
 
 	resolve api
 	[ "$RC" -eq 0 ]
@@ -223,8 +291,8 @@ rowcount() {
 @test "find env: an unset variable fails softly and the next strategy wins" {
 	unset GRAFT_TEST_DIR
 	mkdir -p "$SANDBOX/work/fallback"
-	cfg_set 'target "api"' find 'env:GRAFT_TEST_DIR'
-	cfg_set 'target "api"' find "path:$SANDBOX/work/fallback"
+	cfg_set 'target:api' find 'env:GRAFT_TEST_DIR'
+	cfg_set 'target:api' find "path:$SANDBOX/work/fallback"
 
 	resolve api
 	[ "$RC" -eq 0 ]
@@ -234,7 +302,7 @@ rowcount() {
 @test "find env: a set variable resolves to its directory" {
 	mkdir -p "$SANDBOX/work/from-env"
 	export GRAFT_TEST_DIR="$SANDBOX/work/from-env"
-	cfg_set 'target "api"' find 'env:GRAFT_TEST_DIR'
+	cfg_set 'target:api' find 'env:GRAFT_TEST_DIR'
 
 	resolve api
 	[ "$RC" -eq 0 ]
@@ -243,7 +311,7 @@ rowcount() {
 
 @test "find origin: glob matches after the .git suffix is normalised away" {
 	mkrepo "$SANDBOX/work/api" "git@github.com:acme/api.git"
-	cfg_set 'target "api"' find 'origin:*github.com[:/]acme/api'
+	cfg_set 'target:api' find 'origin:*github.com[:/]acme/api'
 
 	resolve api
 	[ "$RC" -eq 0 ]
@@ -253,7 +321,7 @@ rowcount() {
 @test "find origin: one glob matches both the ssh and the https remote form" {
 	mkrepo "$SANDBOX/work/ssh-one" "git@github.com:acme/api.git"
 	mkrepo "$SANDBOX/work/https-one" "https://github.com/acme/api"
-	cfg_set 'target "a"' find 'origin:*github.com[:/]acme/api'
+	cfg_set 'target:a' find 'origin:*github.com[:/]acme/api'
 
 	resolve a
 	# both checkouts are the same repository - that is ambiguity, not a pick
@@ -264,7 +332,7 @@ rowcount() {
 
 @test "find origin-re: an ERE matches what a glob cannot express" {
 	mkrepo "$SANDBOX/work/api" "https://gitlab.example.com/team/api-service.git"
-	cfg_set 'target "api"' find 'origin-re:^https://gitlab\.example\.com/team/api-(service|gateway)$'
+	cfg_set 'target:api' find 'origin-re:^https://gitlab\.example\.com/team/api-(service|gateway)$'
 
 	resolve api
 	[ "$RC" -eq 0 ]
@@ -274,7 +342,7 @@ rowcount() {
 @test "find dir: a path glob selects exactly one checkout" {
 	mkrepo "$SANDBOX/work/acme/api" "git@github.com:acme/api.git"
 	mkrepo "$SANDBOX/work/acme/web" "git@github.com:acme/web.git"
-	cfg_set 'target "api"' find "dir:$SANDBOX/work/*/api"
+	cfg_set 'target:api' find "dir:$SANDBOX/work/*/api"
 
 	resolve api
 	[ "$RC" -eq 0 ]
@@ -283,7 +351,7 @@ rowcount() {
 
 @test "find parent-of: resolves to the directory above the inner result" {
 	mkrepo "$SANDBOX/work/mono/services/api" "git@github.com:acme/api.git"
-	cfg_set 'target "svc"' find 'parent-of:origin:*acme/api'
+	cfg_set 'target:svc' find 'parent-of:origin:*acme/api'
 
 	resolve svc
 	[ "$RC" -eq 0 ]
@@ -292,8 +360,8 @@ rowcount() {
 
 @test "find target: borrows another target's checkout" {
 	mkrepo "$SANDBOX/work/api" "git@github.com:acme/api.git"
-	cfg_set 'target "api"' find 'origin:*acme/api'
-	cfg_set 'target "docs"' find 'target:api'
+	cfg_set 'target:api' find 'origin:*acme/api'
+	cfg_set 'target:docs' find 'target:api'
 
 	resolve docs
 	[ "$RC" -eq 0 ]
@@ -301,8 +369,8 @@ rowcount() {
 }
 
 @test "find target: a cycle is refused instead of recursing forever" {
-	cfg_set 'target "a"' find 'target:b'
-	cfg_set 'target "b"' find 'target:a'
+	cfg_set 'target:a' find 'target:b'
+	cfg_set 'target:b' find 'target:a'
 
 	run --separate-stderr disc_resolve a
 	[ "$status" -eq 1 ]
@@ -318,8 +386,8 @@ rowcount() {
 
 @test "find: the first strategy that matches wins over later ones" {
 	mkdir -p "$SANDBOX/work/first" "$SANDBOX/work/second"
-	cfg_set 'target "api"' find "path:$SANDBOX/work/first"
-	cfg_set 'target "api"' find "path:$SANDBOX/work/second"
+	cfg_set 'target:api' find "path:$SANDBOX/work/first"
+	cfg_set 'target:api' find "path:$SANDBOX/work/second"
 
 	resolve api
 	[ "$RC" -eq 0 ]
@@ -333,9 +401,9 @@ rowcount() {
 	mkrepo "$SANDBOX/work/api-b" "git@github.com:acme/api.git"
 	mkdir -p "$SANDBOX/work/api-b/src"
 	printf 'x\n' >"$SANDBOX/work/api-b/pom.xml"
-	cfg_set 'target "api"' find 'origin:*acme/api'
-	cfg_set 'target "api"' verify 'pom.xml'
-	cfg_set 'target "api"' verify 'src'
+	cfg_set 'target:api' find 'origin:*acme/api'
+	cfg_set 'target:api' verify 'pom.xml'
+	cfg_set 'target:api' verify 'src'
 
 	resolve api
 	[ "$RC" -eq 0 ]
@@ -344,8 +412,8 @@ rowcount() {
 
 @test "verify: rejecting the only candidate is a miss, not a match" {
 	mkrepo "$SANDBOX/work/api" "git@github.com:acme/api.git"
-	cfg_set 'target "api"' find 'origin:*acme/api'
-	cfg_set 'target "api"' verify 'pom.xml'
+	cfg_set 'target:api' find 'origin:*acme/api'
+	cfg_set 'target:api' verify 'pom.xml'
 
 	resolve api
 	[ "$RC" -eq 1 ]
@@ -356,7 +424,7 @@ rowcount() {
 	mkrepo "$SANDBOX/work/one" "git@github.com:acme/api.git"
 	mkrepo "$SANDBOX/work/two" "git@github.com:acme/api.git"
 	mkrepo "$SANDBOX/work/three" "git@github.com:acme/api.git"
-	cfg_set 'target "api"' find 'origin:*acme/api'
+	cfg_set 'target:api' find 'origin:*acme/api'
 
 	resolve api
 	[ "$RC" -eq 2 ]
@@ -368,7 +436,7 @@ rowcount() {
 
 @test "absence: no strategy matches and nothing is printed" {
 	mkrepo "$SANDBOX/work/api" "git@github.com:acme/api.git"
-	cfg_set 'target "gone"' find 'origin:*acme/nothing-here'
+	cfg_set 'target:gone' find 'origin:*acme/nothing-here'
 
 	resolve gone
 	[ "$RC" -eq 1 ]
@@ -421,13 +489,13 @@ rowcount() {
 	disc_index_load
 	[ "$DISC_FROM_CACHE" -eq 1 ]
 
-	cfg_set 'target "old"' find 'origin:*acme/api'
+	cfg_set 'target:old' find 'origin:*acme/api'
 	resolve old
 	[ "$RC" -eq 1 ]
 	[ -z "$OUT" ]
 
 	# and the rescan it triggered makes the new URL resolvable right away
-	cfg_set 'target "new"' find 'origin:*acme/renamed'
+	cfg_set 'target:new' find 'origin:*acme/renamed'
 	resolve new
 	[ "$RC" -eq 0 ]
 	[ "$OUT" = "$SANDBOX/work/api" ]
@@ -489,7 +557,7 @@ rowcount() {
 @test "pin: a pinned path outranks the find strategies" {
 	mkrepo "$SANDBOX/work/api" "git@github.com:acme/api.git"
 	mkdir -p "$SANDBOX/work/manual"
-	cfg_set 'target "api"' find 'origin:*acme/api'
+	cfg_set 'target:api' find 'origin:*acme/api'
 
 	disc_pin api "$SANDBOX/work/manual"
 	resolve api

@@ -21,6 +21,13 @@ GRAFT_DRY_RUN=0
 
 # --- presentation ------------------------------------------------------------
 
+# Defined up front, not in gr_init_style. Argument parsing runs before styling
+# is decided, and it has to be able to report a bad option - under `set -u` an
+# unset colour variable turns "unknown option" into an unbound-variable crash
+# with the wrong exit code.
+C_RESET='' C_DIM='' C_RED='' C_GREEN='' C_YELLOW='' C_BOLD=''
+G_OK='ok' G_ADD='+' G_FIX='~' G_BAD='!' G_SKIP='-'
+
 # Colour is opt-out in three independent ways, because each is a real situation:
 # a pipe, a user preference, and a terminal that lies about its capabilities.
 gr_init_style() {
@@ -219,6 +226,11 @@ gr_atomic_write() {
 # --- misc --------------------------------------------------------------------
 
 gr_have() { command -v "$1" >/dev/null 2>&1; }
+
+# "1 targets" reads like a bug report about the tool that printed it.
+gr_plural() {
+	if [ "$1" = 1 ]; then printf '%s %s' "$1" "$2"; else printf '%s %s' "$1" "$3"; fi
+}
 
 # Stable short id for a config path, so two context repos on one machine never
 # share cache or state. cksum is in POSIX; sha256sum is not on macOS.

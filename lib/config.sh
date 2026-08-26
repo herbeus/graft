@@ -12,15 +12,15 @@
 # TSV inside plain string variables and is queried by splitting on tabs
 # (SPEC section 9).
 #
-# Section ids used in CFG_DATA and accepted by cfg_get/cfg_get_all:
+# Section ids used in CFG_DATA and accepted by cfg_get/cfg_get_all - this is
+# the one encoding, there is no second spelling:
 #   defaults          for [defaults]
 #   target:<name>     for [target "<name>"]
 #   setup:<name>      for [setup "<name>"]
-# Neither a target nor a setup name can contain a colon, so the encoding is
-# unambiguous. docs/SPEC.md 9.1 does not pin the spelling down, so the two other
-# plausible ones - `target "name"` and `target.name` - are accepted by the
-# accessors as well rather than silently returning nothing to a caller that
-# guessed differently.
+# Neither a target nor a setup name can contain a colon (SPEC 4.2), so the
+# encoding is unambiguous and reversible. Callers that want a target's values
+# use the named readers below (cfg_target_get, cfg_target_finds,
+# cfg_target_verifies, cfg_target_links) and never have to build an id at all.
 
 # --- constants ---------------------------------------------------------------
 
@@ -344,33 +344,10 @@ cfg__sort_errors() {
 
 # --- data access -------------------------------------------------------------
 
-# Accepts target:demo, target "demo" and target.demo for the same section.
-cfg__norm_section() {
-	local s="$1" type rest
-	case "$s" in
-	defaults | target:* | setup:*)
-		printf '%s' "$s"
-		return 0
-		;;
-	'target "'*'"' | 'setup "'*'"')
-		type=${s%% *}
-		rest=${s#* }
-		rest=${rest#\"}
-		printf '%s:%s' "$type" "${rest%\"}"
-		return 0
-		;;
-	target.* | setup.*)
-		type=${s%%.*}
-		printf '%s:%s' "$type" "${s#*.}"
-		return 0
-		;;
-	esac
-	printf '%s' "$s"
-}
-
+# <section> is a section id as encoded above: `defaults`, `target:<name>` or
+# `setup:<name>`. Anything else simply matches no record.
 cfg_get_all() {
-	local section key="$2" rec out=''
-	section=$(cfg__norm_section "$1")
+	local section="$1" key="$2" rec out=''
 	while IFS= read -r rec; do
 		[ -n "$rec" ] || continue
 		cfg__unpack "$rec"
@@ -407,8 +384,7 @@ cfg__first_lineno() {
 
 # Last value wins, which is what an INI reader is expected to do.
 cfg_get() {
-	local section key="$2" all
-	section=$(cfg__norm_section "$1")
+	local section="$1" key="$2" all
 	if cfg__has "$section" "$key"; then
 		all=$(cfg_get_all "$section" "$key")
 		printf '%s\n' "$all" | tail -n 1
@@ -479,6 +455,27 @@ cfg_setups() {
 
 cfg_target_finds() {
 	cfg_get_all "target:$1" find
+}
+
+# Every `verify` of a target, one per line, in config order (SPEC 4.2). Callers
+# outside this module read the target section through here rather than spelling
+# a section id themselves.
+cfg_target_verifies() {
+	cfg_get_all "target:$1" verify
+}
+
+# True when <name> is a declared [target "<name>"]. Deliberately not
+# `cfg_targets | grep -q`: grep -q closes the pipe on the first match, which
+# under `set -o pipefail` turns a *hit* into a non-zero pipeline (SIGPIPE) for
+# every target that is not the last one listed.
+cfg__is_target() {
+	local want="$1" rec
+	while IFS= read -r rec; do
+		case "$rec" in
+		"target:$want$CFG_TAB"*) return 0 ;;
+		esac
+	done <<<"$CFG_SECTIONS"
+	return 1
 }
 
 # --- path rules --------------------------------------------------------------
@@ -1120,7 +1117,7 @@ cfg__check_find() {
 				'point it at a different target'
 			return 0
 		fi
-		if ! cfg_targets | grep -qx -F -- "$arg"; then
+		if ! cfg__is_target "$arg"; then
 			# shellcheck disable=SC2046 # the target list is a word list here
 			cfg__error "$lineno" "find target '$(gr_clean "$arg")' is not a defined target" \
 				"define [target \"$(gr_clean "$arg")\"] or fix the name.$(cfg__suggest "$arg" $(cfg_targets))"

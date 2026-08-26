@@ -395,6 +395,9 @@ cfg_print_errors
     Renders CFG_ERRORS as "graft.conf:LINE: message" plus an indented hint,
     with the offending source line quoted underneath.
 
+Section ids are `defaults`, `target:<name>` and `setup:<name>` - one spelling,
+no aliases. A name cannot contain a colon (4.2), so the encoding is reversible.
+
 cfg_targets                       -> target names, one per line, config order
 cfg_setups                        -> name \t description \t run
 cfg_get <section> <key> [default] -> last value, or default
@@ -402,6 +405,7 @@ cfg_get_all <section> <key>       -> every value, one per line, in order
 cfg_target_get <t> <key> [default]
     Target value, falling back to [defaults], falling back to the given default.
 cfg_target_finds <t>              -> find strategies, one per line, in order
+cfg_target_verifies <t>           -> verify paths, one per line, in order
 cfg_target_links <t>
     Effective links after inheriting [defaults] and applying "!dest" removals.
     Output: source-abs \t dest-rel, one per line. Sources are NOT checked for

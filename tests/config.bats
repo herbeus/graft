@@ -175,19 +175,54 @@ assert_no_errors() {
 	[ -z "$output" ]
 }
 
-@test "config: a section can be addressed in all three spellings" {
+@test "config: a section has exactly one id, and nothing else addresses it" {
 	conf <<-'EOF'
 		[target "demo"]
 		description = the demo checkout
 		find = origin:*/demo.git
+		verify = .git
+		verify = package.json
+
+		[setup "hooks"]
+		run = scripts/hooks.sh
 	EOF
 	assert_no_errors
+	# the documented encoding (SPEC 9.1): defaults, target:<name>, setup:<name>
 	run cfg_get "target:demo" description
 	[ "$output" = "the demo checkout" ]
-	run cfg_get 'target "demo"' description
-	[ "$output" = "the demo checkout" ]
-	run cfg_get_all "target.demo" find
+	run cfg_get_all "target:demo" find
 	[ "$output" = "origin:*/demo.git" ]
+	run cfg_get "setup:hooks" run
+	[ "$output" = "scripts/hooks.sh" ]
+	# no second spelling is tolerated - callers use the named readers instead
+	run cfg_get 'target "demo"' description
+	[ -z "$output" ]
+	run cfg_get_all "target.demo" find
+	[ -z "$output" ]
+}
+
+@test "config: cfg_target_verifies reads verify by target name, in order" {
+	conf <<-'EOF'
+		[target "demo"]
+		find = origin:*/demo.git
+		verify = .git
+		verify = package.json
+
+		[target "bare"]
+		find = origin:*/bare.git
+	EOF
+	assert_no_errors
+	run cfg_target_verifies demo
+	[ "${#lines[@]}" -eq 2 ]
+	[ "${lines[0]}" = ".git" ]
+	[ "${lines[1]}" = "package.json" ]
+	# a target without a verify key yields nothing, not an error
+	run cfg_target_verifies bare
+	assert_status 0
+	[ -z "$output" ]
+	run cfg_target_verifies nosuchtarget
+	assert_status 0
+	[ -z "$output" ]
 }
 
 # --- lexical errors ----------------------------------------------------------
@@ -486,6 +521,110 @@ assert_no_errors() {
 	assert_error "Did you mean 'demo'?"
 	run cfg_target_finds other
 	[ "${lines[1]}" = "parent-of:dir:*/nested" ]
+}
+
+@test "config: find target: a valid reference is accepted under pipefail" {
+	# Regression: bin/graft runs under `set -euo pipefail`. The membership test
+	# used to be `cfg_targets | grep -qx`; grep -q closes the pipe on its first
+	# match, cfg_targets dies of SIGPIPE, and pipefail turned that *hit* into a
+	# failure - so every target that was not the last one listed was rejected
+	# with "is not a defined target ... Did you mean '<that same name>'?".
+	set -o pipefail
+	conf <<-'EOF'
+		[target "web-app"]
+		find = origin:*/web-app
+
+		[target "workspace"]
+		find = parent-of:target:web-app
+	EOF
+	assert_no_errors
+	[ "$rc" -eq 0 ]
+}
+
+@test "config: find target: every position in the target list is accepted" {
+	set -o pipefail
+	conf <<-'EOF'
+		[target "first"]
+		find = origin:*/first
+
+		[target "middle"]
+		find = origin:*/middle
+
+		[target "last"]
+		find = origin:*/last
+
+		[target "user"]
+		find = target:first
+		find = target:middle
+		find = target:last
+	EOF
+	assert_no_errors
+	[ "$rc" -eq 0 ]
+}
+
+@test "config: parent-of accepts every inner strategy" {
+	set -o pipefail
+	export GRAFT_TEST_ROOT="$SANDBOX/checkouts"
+	conf <<-'EOF'
+		[target "web-app"]
+		find = origin:*/web-app
+
+		[target "workspace"]
+		find = parent-of:origin:*/acme/api
+		find = parent-of:origin-re:^https://host/acme/api$
+		find = parent-of:path:${GRAFT_TEST_ROOT}/mono/services/api
+		find = parent-of:env:GRAFT_TEST_DIR
+		find = parent-of:dir:*/services/api
+		find = parent-of:target:web-app
+		find = parent-of:parent-of:origin:*/acme/api
+	EOF
+	assert_no_errors
+	[ "$rc" -eq 0 ]
+	run cfg_target_finds workspace
+	[ "${#lines[@]}" -eq 7 ]
+	# only path: and env: arguments expand, and they expand through parent-of
+	[ "${lines[2]}" = "parent-of:path:$SANDBOX/checkouts/mono/services/api" ]
+	[ "${lines[5]}" = "parent-of:target:web-app" ]
+	[ "${lines[6]}" = "parent-of:parent-of:origin:*/acme/api" ]
+}
+
+@test "config: parent-of validates the inner strategy rather than trusting it" {
+	set -o pipefail
+	conf <<-'EOF'
+		[target "demo"]
+		find = origin:*/demo
+
+		[target "workspace"]
+		find = parent-of:orgin:*/demo
+		find = parent-of:target:nosuch
+		find = parent-of:path:relative/dir
+		find = parent-of:
+	EOF
+	assert_error "unknown find strategy 'orgin'"
+	assert_error "Did you mean 'origin'?"
+	assert_error "find target 'nosuch' is not a defined target"
+	assert_error "find path argument 'relative/dir' is not absolute"
+	assert_error "find strategy 'parent-of' needs an argument"
+}
+
+@test "config: parent-of nested past the limit is refused with a reason" {
+	set -o pipefail
+	conf <<-'EOF'
+		[target "demo"]
+		find = parent-of:parent-of:parent-of:parent-of:parent-of:origin:*/demo
+	EOF
+	assert_error "find parent-of is nested too deeply"
+	assert_error "nest at most four strategies"
+}
+
+@test "config: find target: naming its own target is refused" {
+	set -o pipefail
+	conf <<-'EOF'
+		[target "demo"]
+		find = target:demo
+	EOF
+	assert_error "find target 'demo' refers to its own target"
+	assert_error 'point it at a different target'
 }
 
 @test "config: a broken origin-re is caught before discovery runs" {

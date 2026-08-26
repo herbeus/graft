@@ -224,22 +224,14 @@ disc__origin_of() {
 # --- config access -----------------------------------------------------------
 #
 # Only the readers documented in SPEC 9.1 are used, so this module can be
-# developed and tested without lib/config.sh being present.
+# developed and tested without lib/config.sh being present. Section ids are
+# never spelled out here: cfg_target_finds and cfg_target_verifies take the
+# target name and own the encoding, so this module cannot guess it wrong.
 
 disc__default() {
 	local key="$1" fallback="$2" v
 	v=$(cfg_get_all defaults "$key" 2>/dev/null | tail -n 1)
 	[ -n "$v" ] || v="$fallback"
-	printf '%s' "$v"
-}
-
-# `verify` is repeatable (SPEC 4.2) but has no dedicated reader in 9.1, so it is
-# read straight from the target section. Both plausible spellings of a section
-# name are asked for; the one that does not exist simply yields nothing.
-disc__target_all() {
-	local t="$1" key="$2" v
-	v=$(cfg_get_all "target \"$t\"" "$key" 2>/dev/null)
-	[ -n "$v" ] || v=$(cfg_get_all "target.$t" "$key" 2>/dev/null)
 	printf '%s' "$v"
 }
 
@@ -554,7 +546,10 @@ disc__by_origin() {
 			*) continue ;;
 			esac
 		else
-			printf '%s\n' "$url" | grep -qE -e "$pat" 2>/dev/null || continue
+			# A here-string, not a pipe. `cmd | grep -q` under `set -o pipefail`
+			# is a trap: grep closes the pipe on its first match, the writer
+			# dies of SIGPIPE, and pipefail turns that match into a failure.
+			grep -qE -e "$pat" <<<"$url" 2>/dev/null || continue
 		fi
 		path=$DISC_P
 		# The cached URL is a claim about a checkout, so we check it before we
@@ -658,7 +653,7 @@ disc__candidates() {
 # every `verify` path of the target. Runs in a subshell (no globals to keep).
 disc__verify_filter() {
 	local t="$1" cands="$2" verifies path v ok out=''
-	verifies=$(disc__target_all "$t" verify)
+	verifies=$(cfg_target_verifies "$t" 2>/dev/null)
 	if [ -z "$verifies" ]; then
 		printf '%s' "$cands"
 		return 0

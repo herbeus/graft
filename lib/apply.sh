@@ -129,7 +129,7 @@ ap_is_mountpoint() {
 # Prints exactly one of:
 #   absent unchanged repair foreign backup-dir backup-file mountpoint
 ap_dest_state() {
-	local dest="${1%/}" src="$2" ctx="${3%/}" lex='' res=''
+	local dest="${1%/}" src="$2" ctx="${3%/}" lex='' res='' ap__rel=''
 
 	# P2: -L first. A dangling symlink answers false to -e, and a classifier
 	# that believes that will call `ln -s` on an existing path.
@@ -151,6 +151,24 @@ ap_dest_state() {
 		if [ -n "$lex" ] && [ -n "$ctx" ] && gr_is_inside "$lex" "$ctx"; then
 			printf 'repair\n'
 			return 0
+		fi
+		# A link we made ourselves stops pointing inside the context repo the
+		# moment that repo is moved, and from here it is indistinguishable from
+		# a stranger's link. But our sources always sit at the same place
+		# *relative to* the context root, so a DEAD link whose target ends in
+		# that same relative path came from an older location of this very repo.
+		# Only ever reclaim a dead one: a link that still resolves to something
+		# real is somebody's deliberate choice, and not ours to repoint.
+		if [ ! -e "$dest" ] && [ -n "$lex" ] && [ -n "$ctx" ]; then
+			ap__rel=${src#"$ctx"/}
+			if [ -n "$ap__rel" ] && [ "$ap__rel" != "$src" ]; then
+				case "$lex" in
+				*/"$ap__rel")
+					printf 'repair\n'
+					return 0
+					;;
+				esac
+			fi
 		fi
 		printf 'foreign\n'
 		return 0
