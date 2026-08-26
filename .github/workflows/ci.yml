@@ -1,0 +1,215 @@
+# CI for graft.
+#
+# Four jobs, each answering one question:
+#   lint    - is the shell clean and consistently formatted?
+#   test    - does the suite pass on Linux and on macOS?
+#   bash32  - does it still parse on bash 3.2, the /bin/bash macOS ships?
+#   smoke   - does install.sh install and uninstall.sh leave nothing behind?
+#
+# graft never touches the network at runtime, so nothing here needs credentials.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# Read-only by default. No job here needs to write to the repository.
+permissions:
+  contents: read
+
+# A new push to the same branch cancels the previous run; a push to main is
+# never cancelled, so the badge always reflects a completed run.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+env:
+  # Pinned so a bats release cannot turn a green PR red overnight.
+  BATS_VERSION: v1.11.0
+  SHFMT_VERSION: v3.8.0
+
+jobs:
+  lint:
+    name: lint (shellcheck + shfmt)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      # shellcheck is preinstalled on the GitHub ubuntu images.
+      - name: shellcheck
+        run: |
+          shellcheck --version
+          make lint
+
+      # shfmt is not. `go` is, so install the pinned version with it.
+      # Alternative if the toolchain ever disappears from the image:
+      #   sudo apt-get update && sudo apt-get install -y shfmt
+      # (Ubuntu ships an older shfmt, so the pinned go install is preferred.)
+      - name: install shfmt
+        run: |
+          go install "mvdan.cc/sh/v3/cmd/shfmt@${SHFMT_VERSION}"
+          echo "$(go env GOPATH)/bin" >>"$GITHUB_PATH"
+
+      - name: shfmt
+        run: |
+          shfmt --version
+          make fmt-check
+
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install bats-core
+        run: |
+          git clone --depth 1 --branch "$BATS_VERSION" \
+            https://github.com/bats-core/bats-core.git "$RUNNER_TEMP/bats"
+          echo "$RUNNER_TEMP/bats/bin" >>"$GITHUB_PATH"
+
+      - name: bash version in use
+        run: bash --version | head -1
+
+      - name: run the suite
+        run: |
+          bats --version
+          bats --print-output-on-failure tests/
+
+  bash32:
+    name: bash 3.2 compatibility
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      # Checking out *inside* a `container:` built on Alpine does not work -
+      # the runner injects a glibc node binary that musl cannot execute. So the
+      # checkout happens on the host and only the shell runs in the container.
+      #
+      # `bash:3.2` is the official Docker image (bash 3.2.57). If it ever goes
+      # away, the alternatives, in order of preference:
+      #   1. bash:3.2.57                       (the explicit patch tag)
+      #   2. build it: curl the 3.2.57 tarball plus its official patches
+      #      from ftp.gnu.org and `./configure && make` in a debian:stable image
+      #   3. as a weaker net, run against bash:4.4 and rely on the static
+      #      construct check below to catch 4.x-only syntax
+      - name: parse every shell file with bash 3.2.57
+        run: |
+          docker run --rm -v "$PWD:/src:ro" -w /src bash:3.2 bash -c '
+            echo "container bash: $BASH_VERSION"
+            status=0
+            for f in bin/graft lib/*.sh install.sh uninstall.sh \
+                     tests/helpers/*.bash; do
+              [ -f "$f" ] || continue
+              if bash -n "$f"; then
+                echo "  ok   $f"
+              else
+                echo "  FAIL $f"
+                status=1
+              fi
+            done
+            exit $status
+          '
+
+      # `bash -n` accepts a few things bash 3.2 then fails on at runtime, and
+      # the full suite cannot run in that image (it has no git). This grep is
+      # the second half of the guard - see CONTRIBUTING.md, "The bash 3.2 rule".
+      - name: reject bash 4+ only constructs
+        run: |
+          files="bin/graft lib/*.sh install.sh uninstall.sh tests/helpers/*.bash"
+          pattern='declare[[:space:]]+-A|local[[:space:]]+-A|mapfile|readarray'
+          pattern="$pattern"'|local[[:space:]]+-n|\$\{[A-Za-z_][A-Za-z0-9_]*(\^\^|,,)|&>>'
+          # The second grep drops whole-line comments: the files talk about
+          # these constructs in order to forbid them.
+          # shellcheck disable=SC2086
+          if grep -nE "$pattern" $files | grep -vE ':[0-9]+:[[:space:]]*#'; then
+            echo "::error::bash 4+ construct found - see CONTRIBUTING.md"
+            exit 1
+          fi
+          echo "no bash 4+ constructs"
+
+  smoke:
+    name: install/uninstall smoke (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install into a temporary prefix
+        run: |
+          set -eu
+          prefix="$RUNNER_TEMP/graft-prefix"
+          ./install.sh --prefix "$prefix"
+          test -L "$prefix/graft" || { echo "no symlink created"; exit 1; }
+          test -e "$prefix/graft" || { echo "symlink is dangling"; exit 1; }
+          "$prefix/graft" --version
+          PATH="$prefix:$PATH" graft --version
+
+      - name: installing twice changes nothing
+        run: |
+          set -eu
+          prefix="$RUNNER_TEMP/graft-prefix"
+          before=$(ls -A "$prefix" | sort)
+          ./install.sh --prefix "$prefix"
+          after=$(ls -A "$prefix" | sort)
+          [ "$before" = "$after" ] || { echo "not idempotent"; exit 1; }
+
+      - name: uninstall leaves nothing behind
+        run: |
+          set -eu
+          prefix="$RUNNER_TEMP/graft-prefix"
+          ./uninstall.sh --prefix "$prefix"
+          test ! -e "$prefix/graft" || { echo "symlink still there"; exit 1; }
+          test ! -L "$prefix/graft" || { echo "dangling symlink left"; exit 1; }
+          left=$(ls -A "$prefix" || true)
+          [ -z "$left" ] || { echo "leftovers in prefix: $left"; exit 1; }
+
+      # --modify-path is the only thing that writes outside the prefix, so it is
+      # tested against a throwaway HOME and the rc file is diffed byte for byte.
+      - name: PATH block round-trip
+        run: |
+          set -eu
+          prefix="$RUNNER_TEMP/graft-prefix2"
+          fake="$RUNNER_TEMP/fakehome"
+          mkdir -p "$fake"
+          printf 'export ORIGINAL_LINE=1\n' >"$fake/.zshrc"
+          cp "$fake/.zshrc" "$RUNNER_TEMP/zshrc.orig"
+
+          # ZDOTDIR keeps this on .zshrc for both Linux and macOS.
+          HOME="$fake" ZDOTDIR="$fake" SHELL=/bin/zsh \
+            ./install.sh --prefix "$prefix" --modify-path
+          grep -q '>>> graft >>>' "$fake/.zshrc" || { echo "no block written"; exit 1; }
+
+          HOME="$fake" ZDOTDIR="$fake" SHELL=/bin/zsh \
+            ./install.sh --prefix "$prefix" --modify-path
+          blocks=$(grep -c '>>> graft >>>' "$fake/.zshrc")
+          [ "$blocks" = 1 ] || { echo "$blocks blocks, expected 1"; exit 1; }
+
+          HOME="$fake" ZDOTDIR="$fake" ./uninstall.sh --prefix "$prefix"
+          diff "$RUNNER_TEMP/zshrc.orig" "$fake/.zshrc" \
+            || { echo "rc file not restored byte for byte"; exit 1; }
+          echo "rc file restored exactly"
+
+      - name: a missing bin/graft fails loudly
+        run: |
+          set -eu
+          copy="$RUNNER_TEMP/loose"
+          mkdir -p "$copy"
+          cp install.sh "$copy/"
+          if (cd "$copy" && ./install.sh --prefix "$RUNNER_TEMP/never"); then
+            echo "install.sh succeeded without bin/graft"; exit 1
+          fi
+          test ! -d "$RUNNER_TEMP/never" || { echo "created a prefix anyway"; exit 1; }
+          echo "failed as expected"

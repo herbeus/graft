@@ -1,0 +1,7 @@
+---
+description: web-app project rules
+alwaysApply: true
+---
+
+Prefer function components and hooks. No class components in new code.
+Ask before adding a dependency; the bundle budget is 250 kB gzipped.

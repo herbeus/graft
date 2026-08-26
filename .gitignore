@@ -1,0 +1,34 @@
+# graft is a shell script: there is no build output to ignore. What is listed
+# here is what a developer's working copy accumulates.
+
+# Test and scratch artefacts
+/tmp/
+*.tmp
+*.tmp.[0-9]*
+*.graft-tmp.*
+*.install-tmp.*
+*.graft-backup*
+
+# bats-core, cloned by `make test` or CI when it is not on PATH
+/tests/bats/
+/tests/test_helper/
+/.bats-tmp/
+
+# Editors and OS noise
+.DS_Store
+._*
+Thumbs.db
+*.sw[po]
+*~
+.idea/
+.vscode/
+!.vscode/extensions.json
+
+# Local, machine-specific overrides a contributor may keep next to the checkout
+/graft.conf.local
+/.env
+/.envrc
+/.direnv/
+
+# Coverage / profiling output from kcov, if anyone wires it up
+/coverage/

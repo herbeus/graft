@@ -1,0 +1,4 @@
+# Library files are sourced by bin/graft; shellcheck cannot see the call sites.
+external-sources=true
+# Constants and flag globals are consumed by other lib/ files.
+disable=SC2034
