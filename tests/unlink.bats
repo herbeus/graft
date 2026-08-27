@@ -332,6 +332,57 @@ unlink_github() {
 	[ "$(cat "$CO/.github/keep.md")" = mine ]
 }
 
+@test "unlink: a backup made under a configured suffix is restored from the record" {
+	ap_set_backup_suffix .MYSUFFIX
+	mkdir -p "$CO/.github"
+	printf 'mine\n' >"$CO/.github/keep.md"
+	quiet result demo "$CO" "$SRC" .github suffix yes warn >/dev/null
+	assert_real_dir "$CO/.github.MYSUFFIX"
+
+	run unlink_github
+	assert_status 0
+	[ "$output" = restored ]
+	[ "$(cat "$CO/.github/keep.md")" = mine ]
+	assert_not_exists "$CO/.github.MYSUFFIX"
+}
+
+@test "unlink: the stateless fallback finds a backup named with the configured suffix" {
+	# Without state the suffix is the only thing that identifies a backup, so
+	# ap_unlink_dest has to search for the very same one ap_link wrote.
+	ap_set_backup_suffix .MYSUFFIX
+	mkdir -p "$CO/.github"
+	printf 'mine\n' >"$CO/.github/keep.md"
+	quiet result demo "$CO" "$SRC" .github suffix yes warn >/dev/null
+	rm -- "$ST_FILE"
+	st_init "$CTX/graft.conf"
+
+	run ap_unlink_dest "$CO" .github "$CTX"
+	assert_status 0
+	[ "$output" = restored ]
+	assert_real_dir "$CO/.github"
+	[ "$(cat "$CO/.github/keep.md")" = mine ]
+}
+
+@test "unlink: the stateless fallback leaves a backup with a different suffix alone" {
+	# Somebody changed backup_suffix between the two runs. Guessing which of
+	# the neighbouring directories was ours would move a stranger's data onto
+	# a path the user is still using, so the link goes and the backup stays.
+	ap_set_backup_suffix .MYSUFFIX
+	mkdir -p "$CO/.github"
+	printf 'mine\n' >"$CO/.github/keep.md"
+	quiet result demo "$CO" "$SRC" .github suffix yes warn >/dev/null
+	rm -- "$ST_FILE"
+	st_init "$CTX/graft.conf"
+	ap_set_backup_suffix .OTHER
+
+	run ap_unlink_dest "$CO" .github "$CTX"
+	assert_status 0
+	[ "$output" = removed ]
+	assert_not_exists "$CO/.github"
+	assert_real_dir "$CO/.github.MYSUFFIX"
+	[ "$(cat "$CO/.github.MYSUFFIX/keep.md")" = mine ]
+}
+
 @test "unlink: the stateless fallback refuses a foreign symlink" {
 	mkdir -p "$SANDBOX_P/elsewhere"
 	ln -s "$SANDBOX_P/elsewhere" "$CO/.github"

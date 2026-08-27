@@ -43,6 +43,31 @@ result() { ap_link "$@" 2>/dev/null; }
 # The usual call: target demo, timestamped backups, exclude on, warn on foreign.
 link_github() { result demo "$CO" "$SRC" .github timestamp yes warn; }
 
+# bsd_mv - put a `mv` without `-T` first in PATH, the way macOS ships one.
+# Everything that is not `-T` is handed to the real mv, so only the probe and
+# the path it selects change behaviour.
+bsd_mv() {
+	local bin="$SANDBOX_P/bsd-bin" real
+	real=$(command -v mv)
+	mkdir -p "$bin"
+	cat >"$bin/mv" <<-SH
+		#!/usr/bin/env bash
+		for a in "\$@"; do
+			case "\$a" in
+			-*T*)
+				printf 'mv: illegal option -- T\n' >&2
+				exit 64
+				;;
+			--) break ;;
+			esac
+		done
+		exec $real "\$@"
+	SH
+	chmod +x "$bin/mv"
+	PATH="$bin:$PATH"
+	hash -r
+}
+
 # --- section 6 step 5: the classification table ------------------------------
 
 @test "classify: a destination that is not present is absent" {
@@ -211,6 +236,71 @@ EOS
 	[ "$(cat "$(st_field "$(st_by_dest "$CO/AGENTS.md")" 7)")" = "my own notes" ]
 }
 
+# --- SPEC 4.1 backup_suffix --------------------------------------------------
+#
+# The key was parsed, validated and defaulted, and then nobody read it: the
+# suffix was hardcoded here, so `backup_suffix = .MYSUFFIX` passed `graft check`
+# and still produced `.github.graft-backup`. An accepted key that does nothing
+# is worse than a rejected one, hence a test per direction.
+
+@test "backup: the configured suffix is the name a new backup gets" {
+	ap_set_backup_suffix .MYSUFFIX
+	mkdir -p "$CO/.github"
+	printf 'mine\n' >"$CO/.github/keep.md"
+
+	run result demo "$CO" "$SRC" .github suffix yes warn
+	assert_status 0
+	[ "$output" = backed-up ]
+	assert_symlink_to "$CO/.github" "$SRC"
+	assert_real_dir "$CO/.github.MYSUFFIX"
+	[ "$(cat "$CO/.github.MYSUFFIX/keep.md")" = mine ]
+	assert_not_exists "$CO/.github.graft-backup"
+
+	st_load
+	[ "$(st_field "$(st_by_dest "$CO/.github")" 7)" = "$CO/.github.MYSUFFIX" ]
+}
+
+@test "backup: the configured suffix carries the timestamp mode too" {
+	ap_set_backup_suffix .keepme
+	mkdir -p "$CO/.github"
+
+	run link_github
+	assert_status 0
+	[ "$output" = backed-up ]
+	st_load
+	local backup
+	backup=$(st_field "$(st_by_dest "$CO/.github")" 7)
+	case "$backup" in
+	"$CO/.github.keepme."*) ;;
+	*)
+		printf 'backup ignored the suffix: %s\n' "$backup" >&2
+		return 1
+		;;
+	esac
+	assert_real_dir "$backup"
+}
+
+@test "backup: the default suffix stays .graft-backup" {
+	[ "$(ap_backup_suffix)" = .graft-backup ]
+	mkdir -p "$CO/.github"
+
+	run result demo "$CO" "$SRC" .github suffix yes warn
+	assert_status 0
+	[ "$output" = backed-up ]
+	assert_real_dir "$CO/.github.graft-backup"
+}
+
+@test "backup: a suffix with a slash, or an empty one, is refused" {
+	run ap_set_backup_suffix 'sub/dir'
+	assert_status 1
+	run ap_set_backup_suffix ''
+	assert_status 1
+
+	# A rejected value must not have replaced the one in use.
+	ap_set_backup_suffix 'sub/dir' || :
+	[ "$(ap_backup_suffix)" = .graft-backup ]
+}
+
 @test "link: does not create a link inside an existing directory symlink" {
 	# P1 - `ln -s src dirlink` puts the link INSIDE the directory, and plain
 	# `mv new dirlink` does exactly the same. The destination must be replaced,
@@ -225,6 +315,23 @@ EOS
 	[ -z "$output" ]
 	assert_not_exists "$SRC/github"
 	assert_not_exists "$SRC/.github"
+}
+
+@test "link: a real mv without -T replaces a directory symlink without nesting" {
+	# The same as the test above, but with the fallback selected by the probe
+	# instead of by hand - which is what a macOS run does, and what the broken
+	# probe made every run do without anybody noticing (P7).
+	bsd_mv
+	mkdir -p "$CTX/projects/other"
+	ln -s "$CTX/projects/other" "$CO/.github"
+	AP_MV_T=''
+
+	run link_github
+	assert_status 0
+	[ "$output" = repaired ]
+	assert_symlink_to "$CO/.github" "$SRC"
+	run find "$CTX/projects/other" -mindepth 1
+	[ -z "$output" ]
 }
 
 @test "link: the mv -T fallback replaces a directory symlink without nesting" {
@@ -605,6 +712,48 @@ EOS
 @test "probe: a directory that cannot hold a symlink is reported" {
 	run ap_symlink_capable "$CO/does-not-exist"
 	assert_status 1
+}
+
+@test "probe: mv -T is detected where it really exists" {
+	# Both probe names came out of $(ap_tmpname ...), whose AP_SEQ increment
+	# dies with the command substitution - so they were IDENTICAL,
+	# `mv -f -T -- X X` failed for that reason alone, and every machine on
+	# earth looked like BSD. Guard the precondition first.
+	local a b
+	a=$(ap_tmpname "$CO" mvprobe-a)
+	b=$(ap_tmpname "$CO" mvprobe-b)
+	[ "$a" != "$b" ]
+
+	# What this system can do, established without graft's own probe.
+	local want=1
+	ln -s target "$CO/.t-mv-a"
+	if mv -f -T -- "$CO/.t-mv-a" "$CO/.t-mv-b" 2>/dev/null && [ -L "$CO/.t-mv-b" ]; then
+		want=0
+	fi
+	if [ -L "$CO/.t-mv-a" ]; then rm -- "$CO/.t-mv-a"; fi
+	if [ -L "$CO/.t-mv-b" ]; then rm -- "$CO/.t-mv-b"; fi
+
+	AP_MV_T=''
+	ap_mv_no_target_dir "$CO" || :
+	[ "$AP_MV_T" = "$want" ]
+
+	# On GNU coreutils that answer is not allowed to be "no -T".
+	if mv --version 2>/dev/null | grep -q 'GNU coreutils'; then
+		[ "$AP_MV_T" = 0 ]
+	fi
+
+	# And the probe cleans up after itself.
+	run find "$CO" -maxdepth 1 -name '.graft-mvprobe*'
+	[ -z "$output" ]
+}
+
+@test "probe: a mv without -T is reported as missing, not as present" {
+	bsd_mv
+	AP_MV_T=''
+	ap_mv_no_target_dir "$CO" || :
+	[ "$AP_MV_T" = 1 ]
+	run find "$CO" -maxdepth 1 -name '.graft-mvprobe*'
+	[ -z "$output" ]
 }
 
 # --- invariant I5 under git features that hide tracked files -----------------

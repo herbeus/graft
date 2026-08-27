@@ -1024,3 +1024,42 @@ EOF
 	run grep -c graft "$FRONTEND/.git/info/exclude"
 	[ "$output" = 0 ]
 }
+
+# --- config keys that were accepted but did nothing --------------------------
+#
+# A key the parser validates and the tool then ignores is the worst kind of
+# documentation lie: the user gets a green tick for a setting that never ran.
+
+@test "confirm = yes asks before touching that target and honours a no" {
+	world_basic
+	printf '\nconfirm = yes\n' >>"$CTX/graft.conf"
+	# Non-interactive without --yes: the question cannot be asked, so the
+	# target must be left alone rather than silently linked.
+	run "$GRAFT" link frontend
+	[ ! -L "$FRONTEND/.github" ]
+}
+
+@test "on_foreign_link = abort refuses the whole run, warn does not" {
+	world_basic
+	mkdir -p "$SANDBOX/elsewhere"
+	ln -s "$SANDBOX/elsewhere" "$FRONTEND/.claude"
+
+	printf '\non_foreign_link = warn\n' >>"$CTX/graft.conf"
+	run "$GRAFT" link --yes frontend
+	assert_status 1
+	[ -L "$FRONTEND/.github" ] # the other links still went in
+
+	rm -f "$FRONTEND/.github"
+	rm -rf "$XDG_STATE_HOME/graft"
+	sed -i.bak 's/^on_foreign_link = warn$/on_foreign_link = abort/' "$CTX/graft.conf"
+	run "$GRAFT" link --yes frontend
+	assert_status 1
+	assert_output_contains "on_foreign_link = abort"
+	[ ! -L "$FRONTEND/.github" ] # nothing was applied at all
+}
+
+@test "status shows each target's description" {
+	world_basic
+	run "$GRAFT" status
+	assert_output_contains "the frontend app"
+}

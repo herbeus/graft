@@ -24,6 +24,10 @@ PLAN_AMBIG=""
 # is neither.
 PLAN_MAY_ASK=0
 
+# status groups its lines by target and prefixes each group with the target's
+# description. Everywhere else the (target) suffix on each line is enough.
+PLAN_SHOW_DESC=0
+
 # --- helpers -----------------------------------------------------------------
 
 # Which targets this invocation is about: the ones named on the command line,
@@ -389,9 +393,15 @@ EOF
 
 plan_render() {
 	local rec
+	local last_t="" desc
 	while IFS= read -r rec; do
 		[ -n "$rec" ] || continue
 		plan_unpack "$rec"
+		if [ "$PLAN_SHOW_DESC" = 1 ] && [ "$GRAFT_JSON" != 1 ] && [ "$PF1" != "$last_t" ]; then
+			last_t="$PF1"
+			desc=$(cfg_target_get "$PF1" description "")
+			[ -n "$desc" ] && gr_dim "$PF1 - $(gr_clean "$desc")"
+		fi
 		if [ "$GRAFT_JSON" = 1 ]; then
 			plan_render_json_line "$PF1" "$PF2" "$PF3" "$PF4" "$PF5" "$PF6" "$PF7"
 		else
@@ -404,6 +414,48 @@ EOF
 
 # --- commands -----------------------------------------------------------------
 
+# True when some target hit a foreign symlink and asked us to stop for it.
+plan_foreign_aborts() {
+	local rec t
+	[ "$GRAFT_FORCE" = 1 ] && return 1
+	while IFS= read -r rec; do
+		[ -n "$rec" ] || continue
+		[ "$(plan_field "$rec" 6)" = foreign ] || continue
+		t=$(plan_field "$rec" 1)
+		[ "$(cfg_target_get "$t" on_foreign_link warn)" = abort ] && return 0
+	done <<EOF
+$PLAN_DATA
+EOF
+	return 1
+}
+
+# --- confirm = yes -----------------------------------------------------------
+#
+# Asked once per target, the first time that target would actually change
+# something. Answered targets are remembered for the run so a target with four
+# links does not ask four times.
+PLAN_CONFIRMED=""
+
+plan_target_allowed() {
+	local t="$1" line
+	[ "$(cfg_target_get "$t" confirm no)" = yes ] || return 0
+	while IFS= read -r line; do
+		case "$line" in
+		"yes	$t") return 0 ;;
+		"no	$t") return 1 ;;
+		esac
+	done <<EOF
+$PLAN_CONFIRMED
+EOF
+	if gr_confirm "apply changes to target '$t'?"; then
+		PLAN_CONFIRMED="$PLAN_CONFIRMED"'yes	'"$t"$'\n'
+		return 0
+	fi
+	PLAN_CONFIRMED="$PLAN_CONFIRMED"'no	'"$t"$'\n'
+	gr_skip "$t: skipped on request"
+	return 1
+}
+
 plan_first_run() {
 	[ ! -f "$(st_state_path "$CFG_FILE")" ]
 }
@@ -412,6 +464,16 @@ plan_cmd_link() {
 	[ "$GRAFT_DRY_RUN" = 1 ] || PLAN_MAY_ASK=1
 	plan_build || return "$GRAFT_EX_USAGE"
 	plan_counts
+
+	# "abort" has to mean something other than "warn", or it is a config key
+	# that lies. warn reports the foreign link and links everything else;
+	# abort refuses the whole run so nothing is half-applied.
+	if plan_foreign_aborts; then
+		plan_render
+		gr_err "a foreign symlink is in the way and on_foreign_link = abort"
+		gr_hint "resolve it, or set on_foreign_link = warn, or pass --force"
+		return "$GRAFT_EX_DRIFT"
+	fi
 
 	if [ "$GRAFT_DRY_RUN" = 1 ]; then
 		[ "$GRAFT_JSON" = 1 ] || gr_bold "plan (nothing will be changed)"
@@ -496,6 +558,8 @@ plan_execute() {
 			continue
 		}
 
+		plan_target_allowed "$t" || continue
+
 		backup=$(cfg_target_get "$t" backup timestamp)
 		exclude=$(cfg_target_get "$t" git_exclude yes)
 		foreign=$(cfg_target_get "$t" on_foreign_link warn)
@@ -577,6 +641,7 @@ EOF
 }
 
 plan_cmd_status() {
+	PLAN_SHOW_DESC=1
 	plan_build || return "$GRAFT_EX_USAGE"
 	plan_counts
 	if [ "$GRAFT_JSON" != 1 ]; then

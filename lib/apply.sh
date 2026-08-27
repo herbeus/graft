@@ -13,7 +13,7 @@
 # every function returns a status and one machine-readable word.
 
 AP_CTX_ROOT=''                   # resolved context repo, see ap_set_context
-AP_BACKUP_SUFFIX='.graft-backup' # SPEC 4.1 backup_suffix
+AP_BACKUP_SUFFIX='.graft-backup' # SPEC 4.1 backup_suffix, see ap_set_backup_suffix
 AP_SYMLINK_CACHE=''              # "<dir>\t<0|1>" lines, one probe per directory
 AP_MV_T=''                       # '', 0 = mv -T works, 1 = it does not
 AP_SEQ=0                         # makes temporary names unique within a run
@@ -37,6 +37,22 @@ ap_set_context() {
 }
 
 ap_context() { printf '%s\n' "${AP_CTX_ROOT:-${CFG_CTX_ROOT:-}}"; }
+
+# ap_set_backup_suffix <suffix> - the base every backup name is built from
+# (SPEC 4.1 backup_suffix). Set once per run before ap_link, exactly like
+# ap_set_context: ap_unlink_dest has to look for the very same suffix to find a
+# backup again, so this is one setting for the whole run rather than a parameter
+# of ap_link. Returns 1 and keeps the previous value for an empty suffix or one
+# containing a slash - config.sh rejects both, but apply.sh is the last place
+# before the filesystem and a plan can be built by anything.
+ap_set_backup_suffix() {
+	case "$1" in
+	'' | */*) return 1 ;;
+	esac
+	AP_BACKUP_SUFFIX="$1"
+}
+
+ap_backup_suffix() { printf '%s\n' "$AP_BACKUP_SUFFIX"; }
 
 ap_fail() {
 	AP_LAST_ERROR="$*"
@@ -73,6 +89,11 @@ EOF
 }
 
 # ap_tmpname <dir> <kind> - a name in <dir> that nothing else in this run uses.
+#
+# Callers use it as `x=$(ap_tmpname ...)`, and that command substitution is a
+# subshell: the AP_SEQ increment dies with it and the next call in the same
+# shell returns the SAME name. A caller that needs two names at once therefore
+# asks for two different <kind>s - see ap_mv_no_target_dir.
 ap_tmpname() {
 	AP_SEQ=$((AP_SEQ + 1))
 	printf '%s/.graft-%s.%s.%s\n' "${1%/}" "$2" "$$" "$AP_SEQ"
@@ -90,8 +111,12 @@ ap_mv_no_target_dir() {
 	[ -n "$AP_MV_T" ] && return "$AP_MV_T"
 	AP_MV_T=1
 	[ -d "$dir" ] || return 1
-	a=$(ap_tmpname "$dir" mvprobe)
-	b=$(ap_tmpname "$dir" mvprobe)
+	# Two different kinds, because both names are produced in a subshell and
+	# one kind twice would hand out one name twice - `mv -f -T -- X X` then
+	# fails for that reason alone and the probe reports "no -T" on every
+	# machine, GNU included, leaving the non-atomic fallback as the only path.
+	a=$(ap_tmpname "$dir" mvprobe-a)
+	b=$(ap_tmpname "$dir" mvprobe-b)
 	if ln -s -- .graft-probe "$a" 2>/dev/null; then
 		if mv -f -T -- "$a" "$b" 2>/dev/null && [ -L "$b" ]; then
 			AP_MV_T=0
