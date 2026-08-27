@@ -480,10 +480,26 @@ cfg__is_target() {
 
 # --- path rules --------------------------------------------------------------
 
-# Strip "./" prefixes and trailing slashes, so that ".github/" and "./.github"
-# compare equal to ".github" against the deny list and against each other.
+# Strip "./" prefixes, collapse repeated slashes and drop trailing slashes, so
+# that ".github/", "./.github" and ".github" all compare equal - to each other
+# and, more importantly, to the deny list.
+#
+# The repeated-slash case is not cosmetic. Without it ".config//gh" sails past a
+# deny entry of ".config/gh" while ".config/gh" is refused, which is a deny list
+# that only stops people who were not trying. "..", by contrast, is deliberately
+# left alone here: it is rejected outright a step later, and collapsing it first
+# would hide the very thing that check is looking for.
 cfg__norm_dest() {
 	local d="$1"
+	# Slashes are collapsed first. The other order turns ".//x" into "/x",
+	# which then reads as an absolute path - still refused, but with a message
+	# that sends the reader looking for a leading slash they never wrote.
+	while :; do
+		case "$d" in
+		*//*) d=${d//\/\///} ;;
+		*) break ;;
+		esac
+	done
 	while :; do
 		case "$d" in
 		'./'*) d=${d#./} ;;

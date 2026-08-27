@@ -427,6 +427,36 @@ assert_no_errors() {
 	assert_error "link destination '.bashrc' is on the deny list (.bashrc)"
 }
 
+@test "config: repeated slashes do not sneak a destination past the deny list" {
+	# ".config//gh" once passed while ".config/gh" was refused: the deny list
+	# compared raw strings, so a second slash was all it took. A deny list that
+	# only stops people who are not trying is not a deny list.
+	# One entry per target: three spellings of the same path collapse to one
+	# destination, and the duplicate-destination rule would mask the rest.
+	conf <<-'EOF'
+		[target "a"]
+		link = gh -> .config//gh
+		[target "b"]
+		link = gh -> .config///gh
+		[target "c"]
+		link = keys -> .ssh//config
+		[target "d"]
+		link = h -> .//.config//gh
+	EOF
+	assert_error "link destination '.config//gh' is on the deny list (.config/gh)"
+	assert_error "link destination '.config///gh' is on the deny list (.config/gh)"
+	assert_error "link destination '.ssh//config' is on the deny list (.ssh)"
+	assert_error "link destination './/.config//gh' is on the deny list (.config/gh)"
+}
+
+@test "config: repeated slashes in an ordinary destination stay allowed" {
+	conf <<-'EOF'
+		[target "demo"]
+		link = github -> .github//sub
+	EOF
+	[ "$rc" = 0 ]
+}
+
 @test "config: a link source that escapes the context repo is refused" {
 	conf <<-'EOF'
 		[target "demo"]
