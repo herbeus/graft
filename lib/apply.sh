@@ -800,18 +800,18 @@ ap_unlink_at() {
 		if ap_link_is_ours "$dest" "$src" "$ctx"; then
 			if ! rm -- "$dest"; then
 				ap_fail "cannot remove $(gr_clean "$dest")"
-				printf 'failed\n'
+				ap__say failed
 				return 1
 			fi
 			removed=1
 		else
 			gr_warn "$(gr_clean "$dest") points outside the context repo - left alone"
-			printf 'kept-foreign\n'
+			ap__say kept-foreign
 			return 1
 		fi
 	elif [ -e "$dest" ]; then
 		gr_warn "$(gr_clean "$dest") is not a symlink any more - left alone"
-		printf 'kept-foreign\n'
+		ap__say kept-foreign
 		return 1
 	fi
 
@@ -822,7 +822,7 @@ ap_unlink_at() {
 			restored=1
 		else
 			ap_fail "cannot restore $(gr_clean "$backup")"
-			printf 'failed\n'
+			ap__say failed
 			return 1
 		fi
 	fi
@@ -835,11 +835,11 @@ ap_unlink_at() {
 	ap_rmdir_list "$checkout" "$made"
 
 	if [ "$restored" = 1 ]; then
-		printf 'restored\n'
+		ap__say restored
 	elif [ "$removed" = 1 ]; then
-		printf 'removed\n'
+		ap__say removed
 	else
-		printf 'already-gone\n'
+		ap__say already-gone
 	fi
 	return 0
 }
@@ -857,8 +857,10 @@ ap_unlink_record() {
 	excl=$(st_field "$rec" 8)
 	made=$(st_field "$rec" 9)
 
-	out=$(ap_unlink_at "$checkout" "$dest" "$src" "$backup" "$excl" "$made")
+	AP_RESULT=""
+	ap_unlink_at "$checkout" "$dest" "$src" "$backup" "$excl" "$made" >/dev/null
 	rc=$?
+	out="$AP_RESULT"
 	ap__say "$out"
 	if [ "$rc" = 0 ] && [ -n "$ST_FILE" ]; then
 		st_forget "$dest" || :

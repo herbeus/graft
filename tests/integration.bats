@@ -986,3 +986,41 @@ EOF
 	assert_output_contains "tried: env:GHOST_DIR"
 	assert_output_contains "graft --path ghost="
 }
+
+@test "unlink honours --only instead of removing everything" {
+	# --only is documented as a global flag. Ignoring it here meant someone who
+	# asked for one link back lost all of them.
+	world_basic
+	run "$GRAFT" link --yes frontend
+	assert_status 0
+	run "$GRAFT" unlink --only .claude --yes
+	assert_status 0
+	[ ! -L "$FRONTEND/.claude" ]
+	[ -L "$FRONTEND/.github" ]
+}
+
+@test "unlink --dry-run says would, and removes nothing" {
+	world_basic
+	run "$GRAFT" link --yes frontend
+	run "$GRAFT" unlink --dry-run
+	assert_status 0
+	assert_output_contains "would"
+	assert_output_lacks "links removed"
+	[ -L "$FRONTEND/.github" ]
+}
+
+@test "unlink still works after the state file is lost" {
+	# A rebuilt machine or a cleared XDG_STATE_HOME must not strand every link.
+	world_basic
+	run "$GRAFT" link --yes frontend
+	assert_status 0
+	rm -rf "$XDG_STATE_HOME/graft"
+
+	run "$GRAFT" unlink --yes frontend
+	assert_status 0
+	assert_output_contains "link removed"
+	[ ! -L "$FRONTEND/.github" ]
+	[ ! -L "$FRONTEND/.claude" ]
+	run grep -c graft "$FRONTEND/.git/info/exclude"
+	[ "$output" = 0 ]
+}

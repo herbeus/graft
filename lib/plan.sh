@@ -589,6 +589,43 @@ plan_cmd_status() {
 	return 0
 }
 
+# Reverse whatever we can still recognise as ours, using only what is on disk:
+# a symlink whose target lies inside the context repo. Used when the state file
+# was lost - a rebuilt machine, a cleared XDG_STATE_HOME, a different user.
+plan_unlink_stateless() {
+	local targets="$1" t checkout spec dest_rel
+	PLAN_N_UNLINKED=0
+	while IFS= read -r t; do
+		[ -n "$t" ] || continue
+		checkout=$(disc_resolve "$t" 2>/dev/null) || continue
+		[ -n "$checkout" ] || continue
+		while IFS= read -r spec; do
+			[ -n "$spec" ] || continue
+			dest_rel=${spec#*	}
+			plan_only_matches "$dest_rel" || continue
+			[ -L "$checkout/$dest_rel" ] || continue
+			if [ "$GRAFT_DRY_RUN" = 1 ]; then
+				gr_skip "would remove $(gr_clean "$(plan_short_path "$checkout/$dest_rel")")"
+				PLAN_N_UNLINKED=$((PLAN_N_UNLINKED + 1))
+				continue
+			fi
+			AP_RESULT=""
+			if ap_unlink_dest "$checkout" "$dest_rel" "$CFG_CTX_ROOT" >/dev/null; then
+				case "$AP_RESULT" in
+				removed | restored)
+					gr_ok "$(gr_clean "$(plan_short_path "$checkout/$dest_rel")")  link removed (no state, matched by target)"
+					PLAN_N_UNLINKED=$((PLAN_N_UNLINKED + 1))
+					;;
+				esac
+			fi
+		done <<EOF
+$(cfg_target_links "$t")
+EOF
+	done <<EOF
+$targets
+EOF
+}
+
 plan_unlink_json() {
 	printf '{"target":"%s","dest":"%s","result":"%s","status":"%s"}\n' \
 		"$(gr_json_escape "$1")" "$(gr_json_escape "$2")" \
@@ -603,6 +640,10 @@ plan_cmd_unlink() {
 		[ -n "$t" ] || continue
 		while IFS= read -r rec; do
 			[ -n "$rec" ] || continue
+			# --only is documented as a global flag. Ignoring it here meant a
+			# user who asked for one link back lost every one of them.
+			dest=$(plan_field "$rec" 3)
+			plan_only_matches "${dest#"$(plan_field "$rec" 2)"/}" || continue
 			if [ "$GRAFT_DRY_RUN" = 1 ]; then
 				dest=$(plan_field "$rec" 3)
 				if [ "$GRAFT_JSON" = 1 ]; then
@@ -642,9 +683,22 @@ EOF
 	done <<EOF
 $targets
 EOF
+	# Without a state file there is nothing to iterate, and unlink would report
+	# a cheerful "0 links removed" while every symlink stayed exactly where it
+	# was. Fall back to asking the checkouts themselves.
+	if [ "$n" = 0 ] && [ -z "$(st_records)" ]; then
+		# Not `n=$(plan_unlink_stateless ...)`: a command substitution would
+		# swallow its progress output and hand back the text instead of the
+		# count. Third time this shape has bitten us - see plan_execute.
+		PLAN_N_UNLINKED=0
+		plan_unlink_stateless "$targets"
+		n=$PLAN_N_UNLINKED
+	fi
 	[ "$GRAFT_DRY_RUN" = 1 ] || st_save
 	if [ "$GRAFT_JSON" = 1 ]; then
-		printf '{"summary":{"removed":%s}}\n' "$n"
+		printf '{"summary":{"removed":%s,"dry_run":%s}}\n' "$n" "$GRAFT_DRY_RUN"
+	elif [ "$GRAFT_DRY_RUN" = 1 ]; then
+		gr_say "$(gr_plural "$n" "link would be removed" "links would be removed")"
 	else
 		gr_say "$(gr_plural "$n" "link removed" "links removed")"
 	fi
