@@ -48,6 +48,16 @@ EOF
 
 # --only filters on the destination's basename, because that is the name people
 # actually think in: "just the .claude links".
+plan_target_exists() {
+	local want="$1" t
+	while IFS= read -r t; do
+		[ "$t" = "$want" ] && return 0
+	done <<EOF
+$(cfg_targets)
+EOF
+	return 1
+}
+
 plan_only_matches() {
 	local dest_rel="$1" base want
 	[ -z "$GRAFT_ONLY" ] && return 0
@@ -198,7 +208,11 @@ plan_render_line() {
 	backup-dir) gr_add "$where  existing directory backed up  ($t)" ;;
 	backup-file) gr_add "$where  existing file backed up  ($t)" ;;
 	foreign) gr_warn "$where  foreign symlink, left alone  ($t)" ;;
-	tracked) gr_warn "$where  tracked by git, refused  ($t)" ;;
+	tracked)
+		gr_warn "$where  tracked by git, refused  ($t)"
+		gr_hint "git tracks this path, so a symlink here would commit a deletion."
+		gr_hint "move it into the context repo instead: graft adopt $dest_abs --as $t"
+		;;
 	mountpoint) gr_warn "$where  is a mount point, refused  ($t)" ;;
 	missing-source) gr_warn "$t: source is missing: $(gr_clean "$3")" ;;
 	no-checkout)
@@ -505,8 +519,15 @@ EOF
 }
 
 plan_cmd_adopt() {
-	local dir name src line
-	# No pipe: see the note in lib/discover.sh about grep/head under pipefail.
+	# adopt is the way out of the one state graft refuses to touch: a context
+	# directory that is already committed to the project repo. It is therefore
+	# the command that has to be the most careful, not the least.
+	#
+	# The rule that shapes everything below: a TRACKED directory is copied and
+	# left in place. Moving it would stage a deletion of files graft does not
+	# own, in a repo graft was invited into - and no `unlink` can give those
+	# back. Only git may remove them, and only when the user says so.
+	local dir name checkout rel src spec sp dp found tracked=1 line
 	dir=""
 	while IFS= read -r line; do
 		[ -n "$line" ] || continue
@@ -519,35 +540,124 @@ EOF
 	[ -n "$dir" ] || gr_die "$GRAFT_EX_USAGE" "adopt needs a directory: graft adopt <dir> --as NAME"
 	[ -n "$name" ] || gr_die "$GRAFT_EX_USAGE" "adopt needs --as NAME"
 	dir=$(gr_abspath "$dir")
+	dir=${dir%/}
 	[ -e "$dir" ] || gr_die "$GRAFT_EX_USAGE" "no such path: $(gr_clean "$dir")"
-	[ -L "$dir" ] && gr_die "$GRAFT_EX_USAGE" "$(gr_clean "$dir") is already a symlink"
+	if [ -L "$dir" ]; then
+		gr_err "$(gr_clean "$dir") is already a symlink"
+		gr_hint "there is nothing to adopt - run: graft status"
+		return "$GRAFT_EX_USAGE"
+	fi
 
-	src="$CFG_SOURCE_ROOT/$name/$(basename -- "$dir")"
-	[ -e "$src" ] && gr_die "$GRAFT_EX_USAGE" "already present in the context repo: $(gr_clean "$src")"
+	checkout=$(git -C "$(dirname -- "$dir")" rev-parse --show-toplevel 2>/dev/null) || checkout=""
+	if [ -z "$checkout" ]; then
+		gr_err "$(gr_clean "$dir") is not inside a git checkout"
+		gr_hint "adopt moves context out of a project repo; this path is not in one"
+		return "$GRAFT_EX_USAGE"
+	fi
+	rel=${dir#"$checkout"/}
+
+	if ! plan_target_exists "$name"; then
+		gr_err "no target named '$(gr_clean "$name")' in $(gr_clean "$CFG_FILE")"
+		gr_hint "add one first, then run adopt again:"
+		gr_hint ""
+		gr_hint "  [target \"$name\"]"
+		gr_hint "  find = origin:*/$(basename -- "$checkout")"
+		gr_hint "  link = $(basename -- "$rel") -> $rel"
+		return "$GRAFT_EX_USAGE"
+	fi
+
+	# Where it belongs is not ours to invent: it is whatever the target's own
+	# link rule already says. Guessing a layout here is how you end up with
+	# .github/.github/workflows.
+	found=""
+	while IFS= read -r spec; do
+		[ -n "$spec" ] || continue
+		sp=${spec%%	*}
+		dp=${spec#*	}
+		if [ "$dp" = "$rel" ]; then
+			found="$sp"
+			break
+		fi
+	done <<EOF
+$(cfg_target_links "$name")
+EOF
+	if [ -z "$found" ]; then
+		gr_err "target '$(gr_clean "$name")' has no link rule for '$(gr_clean "$rel")'"
+		gr_hint "add one to $(gr_clean "$CFG_FILE"), then run adopt again:"
+		gr_hint ""
+		gr_hint "  link = $(basename -- "$rel") -> $rel"
+		return "$GRAFT_EX_USAGE"
+	fi
+	src="$found"
+	if [ -e "$src" ] || [ -L "$src" ]; then
+		gr_err "already present in the context repo: $(gr_clean "$src")"
+		gr_hint "merge by hand, or pick a different link destination"
+		return "$GRAFT_EX_USAGE"
+	fi
+
+	ap_is_tracked "$checkout" "$rel" || tracked=0
 
 	gr_bold "plan"
-	gr_say "  move $(gr_clean "$dir")"
-	gr_say "    to $(gr_clean "$src")"
-	gr_say "  then link it back"
-	if [ "$GRAFT_DRY_RUN" = 1 ]; then return 0; fi
-	gr_confirm "adopt $(basename -- "$dir") as target '$name'?" || {
-		gr_say "aborted"
+	if [ "$tracked" = 1 ]; then
+		gr_say "  copy $(gr_clean "$(plan_short_path "$dir")")"
+		gr_say "    to $(gr_clean "$(plan_short_path "$src")")"
+		gr_say "  leave the original alone - it is tracked, so only git may remove it"
+	else
+		gr_say "  move $(gr_clean "$(plan_short_path "$dir")")"
+		gr_say "    to $(gr_clean "$(plan_short_path "$src")")"
+		gr_say "  then link it back"
+	fi
+	[ "$GRAFT_DRY_RUN" = 1 ] && return 0
+	gr_confirm "adopt $(basename -- "$rel") into target '$name'?" || {
+		gr_say "aborted, nothing was changed"
 		return "$GRAFT_EX_UNCONFIRMED"
 	}
 
-	mkdir -p -- "$(dirname -- "$src")"
-	mv -- "$dir" "$src"
+	mkdir -p -- "$(dirname -- "$src")" || {
+		gr_err "cannot create $(gr_clean "$(dirname -- "$src")")"
+		return "$GRAFT_EX_ENV"
+	}
+
+	if [ "$tracked" = 1 ]; then
+		cp -R -- "$dir" "$src" || {
+			gr_err "copy failed, nothing was changed"
+			return "$GRAFT_EX_ENV"
+		}
+		gr_ok "copied into the context repo (your repo is untouched)"
+		gr_say ""
+		gr_bold "three steps to finish, in this order"
+		gr_say "  1. commit it here:"
+		gr_say "       git -C $(gr_clean "$CFG_CTX_ROOT") add $(gr_clean "${src#"$CFG_CTX_ROOT"/}") && git -C $(gr_clean "$CFG_CTX_ROOT") commit -m \"adopt $name/$rel\""
+		gr_say "  2. stop tracking it over there - git removes it, graft never does:"
+		gr_say "       git -C $(gr_clean "$checkout") rm -r --cached -- $(gr_clean "$rel")"
+		gr_say "       git -C $(gr_clean "$checkout") commit -m \"move $rel into the shared context repo\""
+		gr_say "  3. then: graft link $name"
+		return 0
+	fi
+
+	mv -- "$dir" "$src" || {
+		gr_err "move failed, nothing was changed"
+		return "$GRAFT_EX_ENV"
+	}
 	gr_ok "moved into the context repo"
-	gr_say ""
-	gr_bold "now do two things"
-	gr_say "  1. add a target to $(gr_clean "$CFG_FILE"):"
-	gr_say ""
-	gr_say "     [target \"$name\"]"
-	gr_say "     find = origin:*/$name"
-	gr_say "     link = $(basename -- "$dir") -> $(basename -- "$dir")"
-	gr_say ""
-	gr_say "  2. commit it, then run: graft link"
-	return 0
+	AP_RESULT=""
+	if ap_link "$name" "$checkout" "$src" "$rel" \
+		"$(cfg_target_get "$name" backup timestamp)" \
+		"$(cfg_target_get "$name" git_exclude yes)" \
+		"$(cfg_target_get "$name" on_foreign_link warn)" >/dev/null; then
+		st_save
+		gr_ok "linked back: $(gr_clean "$(plan_short_path "$dir")")"
+		gr_say ""
+		gr_say "commit it in the context repo, then your colleagues get it too:"
+		gr_say "  git -C $(gr_clean "$CFG_CTX_ROOT") add $(gr_clean "${src#"$CFG_CTX_ROOT"/}") && git -C $(gr_clean "$CFG_CTX_ROOT") commit -m \"adopt $name/$rel\""
+		return 0
+	fi
+	# The move succeeded and the link did not: say so plainly and say where the
+	# content is now. Silence here is how people lose track of their files.
+	gr_err "moved, but could not create the link ($AP_RESULT)"
+	gr_hint "your content is safe at $(gr_clean "$src")"
+	gr_hint "move it back with: mv -- $(gr_clean "$src") $(gr_clean "$dir")"
+	return "$GRAFT_EX_DRIFT"
 }
 
 plan_cmd_init() {

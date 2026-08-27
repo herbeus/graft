@@ -869,25 +869,72 @@ EOF
 	[ "$(cksum <"$HOME/fresh/graft.conf")" = "$before" ]
 }
 
-@test "adopt moves a real directory into the context repo" {
+@test "adopt refuses when the target has no link rule for that path" {
 	world_basic
 	mkdir -p "$FRONTEND/.vscode"
 	printf '{"editor.formatOnSave": true}\n' >"$FRONTEND/.vscode/settings.json"
 
-	run "$GRAFT" adopt "$FRONTEND/.vscode" --as frontend --yes
-	assert_status 0
-
-	assert_not_exists "$FRONTEND/.vscode"
-	[ -f "$CTX/projects/frontend/.vscode/settings.json" ]
-	assert_output_contains "link = .vscode -> .vscode"
-
-	# Nothing is ever deleted, and a second adopt of the same name refuses.
-	mkdir -p "$FRONTEND/.vscode"
-	printf 'newer\n' >"$FRONTEND/.vscode/settings.json"
+	# graft will not invent a layout. Where the content belongs is whatever the
+	# target's own link rule says, and if there is none it says so.
 	run "$GRAFT" adopt "$FRONTEND/.vscode" --as frontend --yes
 	assert_status 2
-	[ "$(cat "$FRONTEND/.vscode/settings.json")" = newer ]
-	[ "$(cat "$CTX/projects/frontend/.vscode/settings.json")" = '{"editor.formatOnSave": true}' ]
+	assert_output_contains "has no link rule"
+	assert_output_contains "link = .vscode -> .vscode"
+	# and it changed nothing
+	assert_real_dir "$FRONTEND/.vscode"
+	[ "$(cat "$FRONTEND/.vscode/settings.json")" = '{"editor.formatOnSave": true}' ]
+}
+
+@test "adopt moves an untracked directory in and links it back" {
+	world_basic
+	rm -rf "$FRONTEND/.github"
+	mkdir -p "$FRONTEND/.github"
+	printf 'house rules\n' >"$FRONTEND/.github/rules.md"
+	rm -rf "$CTX/projects/frontend/github"
+
+	run "$GRAFT" adopt "$FRONTEND/.github" --as frontend --yes
+	assert_status 0
+
+	# The promise printed in the plan is actually kept: it is a link now.
+	assert_symlink_to "$FRONTEND/.github" "$CTX/projects/frontend/github"
+	[ "$(cat "$FRONTEND/.github/rules.md")" = "house rules" ]
+	[ -z "$(git -C "$FRONTEND" status --porcelain)" ]
+}
+
+@test "adopt copies a tracked directory and never stages a deletion" {
+	# The dangerous case, and the reason adopt exists at all. Moving a tracked
+	# directory out would stage the deletion of files graft does not own, and
+	# no unlink could give them back - so a tracked path is copied, never moved.
+	world_basic
+	rm -rf "$FRONTEND/.github"
+	mkdir -p "$FRONTEND/.github/workflows"
+	printf 'name: ci\n' >"$FRONTEND/.github/workflows/ci.yml"
+	git -C "$FRONTEND" add -A
+	git -C "$FRONTEND" commit -qm "add ci"
+	rm -rf "$CTX/projects/frontend/github"
+
+	run "$GRAFT" adopt "$FRONTEND/.github" --as frontend --yes
+	assert_status 0
+
+	# the project repo is exactly as it was
+	[ -z "$(git -C "$FRONTEND" status --porcelain)" ]
+	assert_real_dir "$FRONTEND/.github"
+	[ "$(cat "$FRONTEND/.github/workflows/ci.yml")" = "name: ci" ]
+	# and the content arrived in the context repo
+	[ "$(cat "$CTX/projects/frontend/github/workflows/ci.yml")" = "name: ci" ]
+	# with git, not graft, named as the only thing that may remove it
+	assert_output_contains "rm -r --cached"
+}
+
+@test "adopt refuses to overwrite content already in the context repo" {
+	world_basic
+	mkdir -p "$FRONTEND/.claude"
+	printf 'newer\n' >"$FRONTEND/.claude/CLAUDE.md"
+
+	run "$GRAFT" adopt "$FRONTEND/.claude" --as frontend --yes
+	assert_status 2
+	assert_output_contains "already present in the context repo"
+	[ "$(cat "$FRONTEND/.claude/CLAUDE.md")" = newer ]
 }
 
 @test "unlink is stateless enough to survive a lost state file" {
