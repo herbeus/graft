@@ -191,9 +191,37 @@ ap_dest_state() {
 }
 
 # ap_dest_denied <dest-rel> - 0 when this destination is off limits.
+# Collapse "//" and "/./" and strip "./" and trailing slashes, so that every
+# spelling of a path meets the deny list in the same shape. A deny list that
+# compares raw strings only stops people who were not trying.
+ap__norm_rel() {
+	local d="$1"
+	while :; do
+		case "$d" in
+		*//*) d=${d//\/\///} ;;
+		*/./*) d=${d//\/.\///} ;;
+		*) break ;;
+		esac
+	done
+	while :; do
+		case "$d" in
+		'./'*) d=${d#./} ;;
+		*) break ;;
+		esac
+	done
+	while :; do
+		case "$d" in
+		*/.) d=${d%/.} ;;
+		*/) d=${d%/} ;;
+		*) break ;;
+		esac
+	done
+	printf '%s' "$d"
+}
+
 ap_dest_denied() {
-	local d="${1#./}" n
-	d=${d%/}
+	local d="$1" n
+	d=$(ap__norm_rel "$d")
 	# shellcheck disable=SC2086 # AP_DENY is a whitespace list on purpose
 	for n in $AP_DENY; do
 		[ "$d" = "$n" ] && return 0
@@ -243,11 +271,35 @@ ap_repo_root() {
 # over one produces a commit that deletes every file under it. There is no
 # override flag, by design; `graft adopt` is the way out.
 ap_is_tracked() {
-	local checkout="$1" rel="${2#./}"
+	local checkout="$1" rel="${2#./}" dest dir inner irel
 	rel=${rel%/}
 	gr_have git || return 1
 	[ -n "$rel" ] || return 1
-	git -C "$checkout" ls-files --error-unmatch -- "$rel" >/dev/null 2>&1
+	dest="$checkout/$rel"
+
+	# Ask the repository that actually owns the path, not the outermost one.
+	# A submodule is only a gitlink in its parent, so the parent's `ls-files`
+	# cannot see files tracked inside it - and graft would happily link over
+	# them, producing exactly the mass-deletion diff invariant I5 exists to
+	# prevent. Walk up to the nearest existing directory, since the destination
+	# itself may not exist yet, and ask the repo that answers there.
+	dir=$(dirname -- "$dest")
+	while [ ! -d "$dir" ] && [ "$dir" != "/" ] && [ -n "$dir" ]; do
+		dir=$(dirname -- "$dir")
+	done
+	inner=$(git -C "$dir" rev-parse --show-toplevel 2>/dev/null) || inner=""
+	if [ -n "$inner" ] && [ "$inner" != "$checkout" ]; then
+		irel=${dest#"$inner"/}
+	else
+		inner="$checkout"
+		irel="$rel"
+	fi
+
+	# GIT_LITERAL_PATHSPECS, because a path may legitimately start with ':',
+	# which git would otherwise read as pathspec magic and then match nothing -
+	# reporting a tracked file as untracked.
+	GIT_LITERAL_PATHSPECS=1 git -C "$inner" ls-files --error-unmatch -- "$irel" \
+		>/dev/null 2>&1
 }
 
 # ap_exclude_file <checkout> - path of the exclude file we may manage, or 1.

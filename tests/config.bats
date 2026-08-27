@@ -878,3 +878,24 @@ assert_no_errors() {
 	assert_error "cannot read config file:"
 	assert_error 'create one with: graft init'
 }
+
+@test "config: a dot segment does not sneak a destination past the deny list" {
+	conf <<-'EOF'
+		[target "a"]
+		link = gh -> .config/./gh
+		[target "b"]
+		link = k -> .ssh/./config
+	EOF
+	assert_error "link destination '.config/./gh' is on the deny list (.config/gh)"
+	assert_error "link destination '.ssh/./config' is on the deny list (.ssh)"
+}
+
+@test "config: a tab in a link destination is refused" {
+	# A tab shifted the fields of the internal plan record, so --dry-run planned
+	# one path and link then did nothing at all.
+	printf '[target "a"]\nlink = gh -> a\tb\n' >"$CTX/graft.conf"
+	rc=0
+	cfg_load "$CTX/graft.conf" || rc=$?
+	[ "$rc" != 0 ]
+	assert_error "contains a tab"
+}

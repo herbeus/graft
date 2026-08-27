@@ -497,6 +497,7 @@ cfg__norm_dest() {
 	while :; do
 		case "$d" in
 		*//*) d=${d//\/\///} ;;
+		*/./*) d=${d//\/.\///} ;;
 		*) break ;;
 		esac
 	done
@@ -508,6 +509,7 @@ cfg__norm_dest() {
 	done
 	while :; do
 		case "$d" in
+		*/.) d=${d%/.} ;;
 		*/) d=${d%/} ;;
 		*) break ;;
 		esac
@@ -520,6 +522,15 @@ cfg__norm_dest() {
 cfg__dest_kind() {
 	local d entry
 	d=$(cfg__norm_dest "$1")
+	# A tab in a destination silently shifts the fields of the internal plan
+	# record, which made --dry-run plan one path and link do nothing at all.
+	# Control characters have no business in a path we are about to create.
+	case "$d" in
+	*"$CFG_TAB"*)
+		printf 'control'
+		return 0
+		;;
+	esac
 	# shellcheck disable=SC2088 # a literal tilde is what we are looking for
 	case "$d" in
 	'')
@@ -989,6 +1000,10 @@ cfg__check_link() {
 	git)
 		cfg__error "$lineno" "link destination '$(gr_clean "$dest")' would write into the git directory" \
 			'graft refuses .git and everything below it'
+		;;
+	control)
+		cfg__error "$lineno" "link destination '$(gr_clean "$dest")' contains a tab" \
+			'write the destination as a plain path, without control characters'
 		;;
 	deny:*)
 		cfg__error "$lineno" "link destination '$(gr_clean "$dest")' is on the deny list (${kind#deny:})" \

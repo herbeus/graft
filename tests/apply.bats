@@ -606,3 +606,51 @@ EOS
 	run ap_symlink_capable "$CO/does-not-exist"
 	assert_status 1
 }
+
+# --- invariant I5 under git features that hide tracked files -----------------
+#
+# Both of these were found by an adversarial review: `git ls-files` in the outer
+# repo answers "not tracked" for files that very much are, and graft then linked
+# over them - the exact mass-deletion diff I5 exists to prevent.
+
+@test "I5: a path tracked inside a submodule is refused, not overwritten" {
+	local outer="$SANDBOX_P/outer" inner="$SANDBOX_P/inner"
+	mkrepo "$inner"
+	mkdir -p "$inner/docs"
+	printf 'guide\n' >"$inner/docs/guide.md"
+	git -C "$inner" add -A
+	git -C "$inner" commit -qm docs
+	mkrepo "$outer"
+	git -c protocol.file.allow=always -C "$outer" submodule add -q "$inner" sub
+	git -C "$outer" commit -qm "add submodule"
+
+	# The parent repo only sees a gitlink, so it must ask the submodule itself.
+	run ap_is_tracked "$outer" "sub/docs"
+	[ "$status" -eq 0 ]
+	[ -f "$outer/sub/docs/guide.md" ]
+}
+
+@test "I5: a tracked path whose name starts with a colon is refused" {
+	local repo="$SANDBOX_P/magic"
+	mkrepo "$repo"
+	mkdir -p "$repo/:magic"
+	printf 'x\n' >"$repo/:magic/f.md"
+	git -C "$repo" add -A .
+	git -C "$repo" commit -qm magic
+
+	# Without GIT_LITERAL_PATHSPECS git reads the leading colon as pathspec
+	# magic, matches nothing, and reports a tracked file as untracked.
+	run ap_is_tracked "$repo" ":magic"
+	[ "$status" -eq 0 ]
+}
+
+@test "deny list: a dot segment does not sneak a destination past it" {
+	run ap_dest_denied ".config/./gh"
+	[ "$status" -eq 0 ]
+	run ap_dest_denied ".config//gh"
+	[ "$status" -eq 0 ]
+	run ap_dest_denied ".ssh/./config"
+	[ "$status" -eq 0 ]
+	run ap_dest_denied ".github/./sub"
+	[ "$status" -ne 0 ]
+}
