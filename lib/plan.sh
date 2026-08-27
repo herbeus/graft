@@ -14,6 +14,16 @@ PLAN_DATA=""
 # reports outcomes instead of repeating the same list back at the user.
 PLAN_SHOWN=0
 
+# Candidates for targets that matched more than one checkout, as
+# "<target>\t<path>" lines. Kept out of PLAN_DATA because a plan record is one
+# line and this is a list.
+PLAN_AMBIG=""
+
+# Only `graft link` may ask which checkout to use. `status` and `--dry-run` are
+# meant to be safe to run and safe to pipe: a preview that blocks on a question
+# is neither.
+PLAN_MAY_ASK=0
+
 # --- helpers -----------------------------------------------------------------
 
 # Which targets this invocation is about: the ones named on the command line,
@@ -95,6 +105,58 @@ $GRAFT_PINS
 EOF
 }
 
+# Offer the candidates as a numbered list. Returns the chosen path on stdout,
+# or 1 when we must not choose (not a terminal, or the user declined).
+plan_choose() {
+	local t="$1" cand i=0 pick when origin
+	[ "$PLAN_MAY_ASK" = 1 ] || return 1
+	[ "$GRAFT_NO_INPUT" = 1 ] && return 1
+	gr_tty || return 1
+	printf '\n%s%s matches more than one checkout:%s\n' "$C_BOLD" "$t" "$C_RESET" >/dev/tty
+	while IFS= read -r cand; do
+		[ -n "$cand" ] || continue
+		i=$((i + 1))
+		when=$(git -C "$cand" log -1 --format=%cr 2>/dev/null) || when=""
+		origin=$(disc_info "$cand" 2>/dev/null) || origin=""
+		origin=${origin%%	*}
+		printf '  %s) %s\n' "$i" "$(gr_clean "$(plan_short_path "$cand")")" >/dev/tty
+		printf '     %s%s%s%s\n' "$C_DIM" "$(gr_clean "$origin")" \
+			"$([ -n "$when" ] && printf ', last commit %s' "$when")" "$C_RESET" >/dev/tty
+	done <<EOF
+$(plan_ambig_for "$t")
+EOF
+	printf '  pick 1-%s, or anything else to skip: ' "$i" >/dev/tty
+	IFS= read -r pick </dev/tty || return 1
+	case "$pick" in
+	'' | *[!0-9]*) return 1 ;;
+	esac
+	[ "$pick" -ge 1 ] && [ "$pick" -le "$i" ] || return 1
+	i=0
+	while IFS= read -r cand; do
+		[ -n "$cand" ] || continue
+		i=$((i + 1))
+		if [ "$i" = "$pick" ]; then
+			printf '%s\n' "$cand"
+			return 0
+		fi
+	done <<EOF
+$(plan_ambig_for "$t")
+EOF
+	return 1
+}
+
+plan_ambig_for() {
+	local want="$1" line
+	while IFS= read -r line; do
+		[ -n "$line" ] || continue
+		case "$line" in
+		"$want	"*) printf '%s\n' "${line#*	}" ;;
+		esac
+	done <<EOF
+$PLAN_AMBIG
+EOF
+}
+
 plan_record() {
 	PLAN_DATA="$PLAN_DATA$(printf '%s\t%s\t%s\t%s\t%s\t%s\t%s' \
 		"$1" "$2" "$3" "$4" "$5" "$6" "$7")"$'\n'
@@ -125,6 +187,7 @@ plan_unpack() {
 plan_build() {
 	PLAN_DATA=""
 	local targets t checkout rc spec src dest_rel dest_abs action detail
+	local cand chosen n
 
 	targets=$(plan_selected_targets) || return 2
 	plan_apply_pins || return 2
@@ -145,9 +208,27 @@ plan_build() {
 			rc=$?
 		fi
 		if [ "$rc" -eq 2 ]; then
-			plan_record "$t" "" "" "" "" "ambiguous" \
-				"$(printf '%s' "$checkout" | tr '\n' ' ')"
-			continue
+			# Never pick one. Two clones of the same repo are not
+			# interchangeable, and the wrong guess gets cached and then quietly
+			# repeated on every later run.
+			n=0
+			while IFS= read -r cand; do
+				[ -n "$cand" ] || continue
+				n=$((n + 1))
+				PLAN_AMBIG="$PLAN_AMBIG$t	$cand"$'\n'
+			done <<EOF
+$checkout
+EOF
+			if chosen=$(plan_choose "$t"); then
+				checkout="$chosen"
+				# The ambiguity is resolved. Without clearing rc the next
+				# check still sees 2 and files the target as "no checkout".
+				rc=0
+				disc_pin "$t" "$chosen"
+			else
+				plan_record "$t" "" "" "" "" "ambiguous" "$n"
+				continue
+			fi
 		fi
 		if [ "$rc" -ne 0 ] || [ -z "$checkout" ]; then
 			plan_record "$t" "" "" "" "" "no-checkout" \
@@ -221,10 +302,38 @@ plan_render_line() {
 		else
 			gr_skip "$t: no checkout found"
 		fi
+		plan_explain_no_checkout "$t"
 		;;
-	ambiguous) gr_warn "$t: several checkouts match: $(gr_clean "$detail")" ;;
+	ambiguous)
+		gr_warn "$t: $detail checkouts match - graft will not pick one for you"
+		plan_list_ambig "$t"
+		gr_hint "choose one: graft --path $t=<directory>"
+		;;
 	*) gr_skip "$where  $action  ($t)" ;;
 	esac
+}
+
+# The most common cause of "no checkout found" is a pattern that cannot match,
+# so show the patterns rather than only the verdict.
+plan_explain_no_checkout() {
+	local t="$1" f
+	while IFS= read -r f; do
+		[ -n "$f" ] || continue
+		gr_hint "tried: $(gr_clean "$f")"
+	done <<EOF
+$(cfg_target_finds "$t")
+EOF
+	gr_hint "point at it directly: graft --path $t=<directory>"
+}
+
+plan_list_ambig() {
+	local t="$1" cand
+	while IFS= read -r cand; do
+		[ -n "$cand" ] || continue
+		gr_hint "$(gr_clean "$(plan_short_path "$cand")")"
+	done <<EOF
+$(plan_ambig_for "$t")
+EOF
 }
 
 plan_render_json_line() {
@@ -300,6 +409,7 @@ plan_first_run() {
 }
 
 plan_cmd_link() {
+	[ "$GRAFT_DRY_RUN" = 1 ] || PLAN_MAY_ASK=1
 	plan_build || return "$GRAFT_EX_USAGE"
 	plan_counts
 
@@ -314,10 +424,17 @@ plan_cmd_link() {
 	# Nothing to do is the common case after the first run, so it gets exactly
 	# one line. A tool that is chatty when idle trains people to stop reading it,
 	# and then they miss the run that mattered.
-	if [ "$PLAN_N_CHANGE" = 0 ] && [ "$PLAN_N_PROBLEM" = 0 ]; then
+	# The silent one-liner is only honest when there is genuinely nothing left:
+	# a skipped target is something the user should hear about exactly once,
+	# not something to hide behind a green tick.
+	if [ "$PLAN_N_CHANGE" = 0 ] && [ "$PLAN_N_PROBLEM" = 0 ] && [ "$PLAN_N_SKIP" = 0 ]; then
 		if [ "$GRAFT_JSON" = 1 ]; then
 			plan_render
 			plan_summary_line "did"
+		elif [ "$PLAN_N_OK" = 0 ]; then
+			gr_warn "nothing to link: no target resolved to a checkout"
+			gr_hint "check the find patterns in $(gr_clean "$CFG_FILE"), or run: graft status"
+			return "$GRAFT_EX_DRIFT"
 		else
 			gr_say "$C_GREEN$G_OK$C_RESET $(gr_plural "$PLAN_N_OK" "link is" "links are") up to date, nothing to do"
 		fi
@@ -415,9 +532,25 @@ plan_summary_line() {
 			"$PLAN_N_CHANGE" "$PLAN_N_OK" "$PLAN_N_PROBLEM" "$PLAN_N_SKIP"
 		return 0
 	}
-	if [ "$PLAN_N_PROBLEM" -gt 0 ]; then
+	# Only speak up when there is something to say, and then count everything -
+	# a line that reports one problem while three lines above it show three is
+	# worse than no line at all.
+	if [ "$PLAN_N_PROBLEM" -gt 0 ] || [ "$PLAN_N_SKIP" -gt 0 ]; then
 		gr_say ""
-		gr_say "$PLAN_N_CHANGE $verb change, $PLAN_N_OK already correct, $PLAN_N_PROBLEM need attention"
+		local parts=""
+		if [ "$PLAN_N_CHANGE" -gt 0 ]; then
+			parts=$(gr_plural "$PLAN_N_CHANGE" "change $verb" "changes $verb")
+		fi
+		if [ "$PLAN_N_OK" -gt 0 ]; then
+			parts="${parts:+$parts, }$PLAN_N_OK already correct"
+		fi
+		if [ "$PLAN_N_PROBLEM" -gt 0 ]; then
+			parts="${parts:+$parts, }$(gr_plural "$PLAN_N_PROBLEM" needs need) attention"
+		fi
+		if [ "$PLAN_N_SKIP" -gt 0 ]; then
+			parts="${parts:+$parts, }$PLAN_N_SKIP skipped"
+		fi
+		gr_say "$parts"
 	fi
 	return 0
 }

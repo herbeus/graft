@@ -75,15 +75,26 @@ gr_hint() { printf '%s      %s%s\n' "$C_DIM" "$*" "$C_RESET" >&2; }
 
 # --- prompting ---------------------------------------------------------------
 
+# Is there a human at a terminal we can talk to?
+#
+# Deliberately NOT `[ -t 0 ]`. Half of this program's work happens inside
+# `while read ... done <<EOF` loops, and in there stdin is the here-document,
+# so a prompt would read the loop's own data and `-t 0` would say "not a
+# terminal" even with a user sitting right there. /dev/tty is the controlling
+# terminal regardless of what stdin currently points at, and it is absent
+# exactly where it should be: cron, CI, a pipeline.
+gr_tty() { [ -r /dev/tty ] && [ -w /dev/tty ]; }
+
 # gr_confirm <question> -> 0 = yes
 # Non-interactive is never a silent yes: callers decide whether that means
 # "skip" or "exit 3", but it never means "go ahead".
 gr_confirm() {
 	local q="$1" ans
 	[ "$GRAFT_ASSUME_YES" = 1 ] && return 0
-	if [ "$GRAFT_NO_INPUT" = 1 ] || [ ! -t 0 ]; then return 1; fi
-	printf '%s [y/N] ' "$q" >&2
-	IFS= read -r ans || return 1
+	[ "$GRAFT_NO_INPUT" = 1 ] && return 1
+	gr_tty || return 1
+	printf '%s [y/N] ' "$q" >/dev/tty
+	IFS= read -r ans </dev/tty || return 1
 	case "$ans" in [yYjJ] | [yY]es | [jJ]a) return 0 ;; *) return 1 ;; esac
 }
 

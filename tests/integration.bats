@@ -839,7 +839,9 @@ EOF
 
 
 	assert_status 1
-	assert_output_contains "several checkouts match"
+	assert_output_contains "checkouts match"
+	# and it must hand over the exact way to resolve it, not just complain
+	assert_output_contains "graft --path backend="
 	assert_output_contains "backend-fork"
 }
 
@@ -955,4 +957,32 @@ EOF
 		[ "$(readlink "$FRONTEND/.github")" = "$before_target" ]
 	fi
 	[ -f "$CTX/projects/frontend/github/copilot-instructions.md" ]
+}
+
+@test "a target that resolves nowhere is reported, not ticked off as done" {
+	# A green "nothing to do" for a configuration in which nothing resolved is
+	# the single most misleading thing this tool could print.
+	world_basic
+	cat >>"$CTX/graft.conf" <<-'CONF'
+
+		[target "ghost"]
+		find = origin:*/acme/ghost-that-does-not-exist
+	CONF
+	run "$GRAFT" link --yes
+	assert_output_contains "ghost"
+	assert_output_lacks "nothing to do"
+}
+
+@test "a missing checkout says which patterns were tried and how to pin it" {
+	world_basic
+	cat >>"$CTX/graft.conf" <<-'CONF'
+
+		[target "ghost"]
+		find = origin:*/acme/nowhere
+		find = env:GHOST_DIR
+	CONF
+	run "$GRAFT" status
+	assert_output_contains "tried: origin:*/acme/nowhere"
+	assert_output_contains "tried: env:GHOST_DIR"
+	assert_output_contains "graft --path ghost="
 }
