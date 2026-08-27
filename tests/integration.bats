@@ -1066,7 +1066,8 @@ EOF
 
 @test "backup_suffix is honoured end to end, including by unlink" {
 	world_basic
-	printf '\nbackup_suffix = .MYSUFFIX\n' >>"$CTX/graft.conf"
+	# into [defaults], not appended at the end where the last [target] block is
+	sed -i.bak 's/^\[defaults\]$/[defaults]\nbackup_suffix = .MYSUFFIX/' "$CTX/graft.conf"
 	mkdir -p "$FRONTEND/.github"
 	printf 'precious\n' >"$FRONTEND/.github/keep.md"
 
