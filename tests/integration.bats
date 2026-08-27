@@ -1063,3 +1063,21 @@ EOF
 	run "$GRAFT" status
 	assert_output_contains "the frontend app"
 }
+
+@test "backup_suffix is honoured end to end, including by unlink" {
+	world_basic
+	printf '\nbackup_suffix = .MYSUFFIX\n' >>"$CTX/graft.conf"
+	mkdir -p "$FRONTEND/.github"
+	printf 'precious\n' >"$FRONTEND/.github/keep.md"
+
+	run "$GRAFT" link --yes frontend
+	assert_status 0
+	# the configured suffix, not the hardcoded default
+	[ -z "$(find "$FRONTEND" -maxdepth 1 -name '.github.graft-backup*' -print -quit)" ]
+	[ -n "$(find "$FRONTEND" -maxdepth 1 -name '.github.MYSUFFIX*' -print -quit)" ]
+
+	# and unlink has to find that same backup again
+	run "$GRAFT" unlink --yes frontend
+	assert_status 0
+	[ "$(cat "$FRONTEND/.github/keep.md")" = precious ]
+}

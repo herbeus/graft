@@ -33,10 +33,15 @@ These are not preferences. A change that breaks one of these is a bug.
   originates from the context repo or from any config file. No `eval`, no `source`
   of config/cache/state, no `sh -c` on config-derived strings.
 - **I2 - No network.** graft never opens a socket. No `git fetch`, no `curl`.
-- **I3 - Nothing is deleted.** The only `rm` graft ever performs is
-  `rm -- "$path"` on a path that is a symlink (`[ -L ]`) *and* known to be ours.
-  No `rm -r`, no `rm -f`, never a trailing slash, never on a directory.
-  Existing user data is *moved* to a backup, never removed.
+- **I3 - Nothing of the user's is deleted.** On any path that came from
+  configuration, discovery or state, the only removal graft performs is
+  `rm -- "$path"` on a path that is a symlink (`[ -L ]`) *and* known to be
+  ours. No `rm -r`, never a trailing slash, never on a directory. Existing user
+  data is *moved* to a backup, never removed.
+  The single exception is graft's own temporary files: a write that goes
+  through `gr_atomic_write` removes the temp file it created moments earlier,
+  under a name it chose, in a directory it owns. State that plainly, rather
+  than claiming a `grep -c 'rm '` of 1 that the code does not support.
 - **I4 - Containment.** Every link destination must resolve to a path strictly
   inside its target checkout. Every link source must resolve to a path strictly
   inside the context repo. Resolution happens *before* the check, so symlinks
@@ -468,6 +473,11 @@ ap_dest_state <dest> <src-resolved> <ctx-root>
 
 ap_is_tracked <checkout> <dest-rel>     0 if git tracks the path (invariant I5)
 ap_git_common_dir <checkout>            prints the common git dir, or returns 1
+
+ap_set_backup_suffix <suffix>    ap_backup_suffix
+    The suffix used for backups, set once per run. A run-wide setting rather
+    than an ap_link argument because unlink must find the same backup again and
+    has no link record to carry it. Rejects an empty suffix or one with a "/".
 
 ap_set_context <ctx-root>
     Sets the context repo root used by the containment checks (I4). Call once

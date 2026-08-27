@@ -63,8 +63,10 @@ usage:
   graft status [<target>...]   show what is linked, drifted or missing
   graft check                  validate graft.conf, touch nothing
   graft unlink [<target>...]   remove our links and restore backups
-  graft adopt <dir> --as NAME  move an existing dir into the context repo
+  graft adopt <dir> --as NAME  take an existing dir into the context repo
   graft init                   write a starter graft.conf
+  graft version                print the version
+  graft help                   this text
 
 options:
   -n, --dry-run       print the plan, change nothing
@@ -82,8 +84,14 @@ options:
   -V, --version       version
 
 exit codes:
-  0 done   1 drift or conflict   2 bad usage or config
-  3 changes needed but not confirmed   4 environment unusable
+  0 done                          1 drift or conflict
+  2 bad usage or config           3 changes needed but not confirmed
+  4 environment unusable        130 interrupted
+
+environment:
+  GRAFT_CONFIG   path to graft.conf, same as --config
+  NO_COLOR       disable colour, same as --no-color
+  CI             any value implies --no-input
 
 full documentation: docs/ in the repo, or https://github.com/OWNER/graft
 USAGE
@@ -211,6 +219,9 @@ graft_need_config() {
 	st_init "$CFG_FILE"
 	st_load "$CFG_FILE"
 	ap_set_context "$CFG_CTX_ROOT"
+	# Run-wide rather than a per-link argument, because unlink has to find the
+	# backup again later and has no link record to carry it.
+	ap_set_backup_suffix "$(cfg_get defaults backup_suffix .graft-backup)" || :
 }
 
 # --- commands -----------------------------------------------------------------
