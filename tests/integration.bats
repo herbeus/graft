@@ -1127,3 +1127,23 @@ EOF
 	# and no raw shell noise from the probe
 	assert_output_lacks "Permission denied"
 }
+
+@test "shared fragments inside the context repo survive the link" {
+	# A context repo commonly keeps one copy of a shared document and points at
+	# it from several targets with a relative symlink. Those links resolve
+	# against their real location, so they have to keep working when the tree
+	# is reached through graft's own symlink - otherwise every project gets a
+	# .github with a dead file in it.
+	world_basic
+	mkdir -p "$CTX/docs" "$CTX/projects/frontend/github/instructions"
+	printf 'house rules\n' >"$CTX/docs/conventions.md"
+	ln -s ../../../../docs/conventions.md \
+		"$CTX/projects/frontend/github/instructions/conventions.md"
+
+	run "$GRAFT" link --yes frontend
+	assert_status 0
+	[ "$(cat "$FRONTEND/.github/instructions/conventions.md")" = "house rules" ]
+	# and a tool walking the tree finds it rather than a dangling entry
+	run find -L "$FRONTEND/.github" -name conventions.md
+	assert_output_contains "conventions.md"
+}
