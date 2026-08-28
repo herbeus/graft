@@ -523,6 +523,9 @@ plan_cmd_link() {
 	if [ "$PLAN_SHOWN" = 1 ] && [ "$GRAFT_JSON" != 1 ]; then
 		gr_say ""
 		gr_ok "$(gr_plural "$PLAN_R_DONE" "link in place" "links in place")"
+		# The plan was shown instead of the per-link lines, so the backup
+		# hint has not been printed yet - and this is the run that made them.
+		plan_report_backups
 	fi
 	plan_summary_line "did"
 	plan_print_setup_notes
@@ -576,7 +579,10 @@ plan_execute() {
 			case "$result" in
 			created) gr_add "$(gr_clean "$(plan_short_path "$dest_abs")")  ($t)" ;;
 			repaired) gr_fix "$(gr_clean "$(plan_short_path "$dest_abs")")  repointed  ($t)" ;;
-			backed-up) gr_add "$(gr_clean "$(plan_short_path "$dest_abs")")  existing content backed up  ($t)" ;;
+			backed-up)
+				gr_add "$(gr_clean "$(plan_short_path "$dest_abs")")  ($t)"
+				gr_hint "your previous content is at $(gr_clean "$(plan_short_path "$(plan_backup_of "$dest_abs")")")"
+				;;
 			*) gr_skip "$(gr_clean "$(plan_short_path "$dest_abs")")  $result  ($t)" ;;
 			esac
 		else
@@ -587,6 +593,36 @@ plan_execute() {
 $PLAN_DATA
 EOF
 	st_save
+}
+
+# The backup path recorded for a destination, or empty. Read back from the
+# state rather than plumbed out of ap_link, because that is where unlink will
+# look for it too - one source of truth for where the user's data went.
+plan_backup_of() {
+	local rec
+	rec=$(st_by_dest "$1" 2>/dev/null) || return 0
+	st_field "$rec" 7
+}
+
+# Backups are excluded from git status so they do not become commit noise, so
+# the tool has to be the one that remembers them out loud.
+plan_report_backups() {
+	local rec b n=0
+	[ "$GRAFT_JSON" = 1 ] && return 0
+	while IFS= read -r rec; do
+		[ -n "$rec" ] || continue
+		b=$(st_field "$rec" 7)
+		[ -n "$b" ] || continue
+		{ [ -e "$b" ] || [ -L "$b" ]; } || continue
+		[ "$n" = 0 ] && gr_say "" && gr_bold "your content that graft moved aside"
+		n=$((n + 1))
+		gr_say "  $(gr_clean "$(plan_short_path "$b")")"
+	done <<EOF
+$(st_records)
+EOF
+	[ "$n" = 0 ] && return 0
+	gr_dim "  graft unlink puts these back; they are hidden from git status until then"
+	return 0
 }
 
 plan_summary_line() {
@@ -648,6 +684,7 @@ plan_cmd_status() {
 		gr_bold "context: $(gr_clean "$CFG_CTX_ROOT")"
 	fi
 	plan_render
+	plan_report_backups
 	plan_summary_line "pending"
 	[ "$PLAN_N_PROBLEM" -gt 0 ] && return "$GRAFT_EX_DRIFT"
 	[ "$PLAN_N_CHANGE" -gt 0 ] && return "$GRAFT_EX_DRIFT"

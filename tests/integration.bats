@@ -1082,3 +1082,30 @@ EOF
 	assert_status 0
 	[ "$(cat "$FRONTEND/.github/keep.md")" = precious ]
 }
+
+@test "a backup stays out of git status but graft keeps telling you about it" {
+	# The promise is that the project repo is left alone. A backup directory
+	# sitting untracked in `git status` breaks that just as surely as the link
+	# would - and eventually someone sweeps it into a `git add -A`.
+	world_basic
+	mkdir -p "$FRONTEND/.github"
+	printf 'precious\n' >"$FRONTEND/.github/keep.md"
+
+	run "$GRAFT" link --yes frontend
+	assert_status 0
+	# it was moved aside, and the run says where to
+	assert_output_contains "moved aside"
+	[ -z "$(git -C "$FRONTEND" status --porcelain)" ]
+
+	# hidden, but not forgotten
+	run "$GRAFT" status
+	assert_output_contains "moved aside"
+	assert_output_contains ".graft-backup"
+
+	# and unlink takes both the link and the backup's exclude line back out
+	run "$GRAFT" unlink --yes frontend
+	assert_status 0
+	[ "$(cat "$FRONTEND/.github/keep.md")" = precious ]
+	run grep -c graft "$FRONTEND/.git/info/exclude"
+	[ "$output" = 0 ]
+}

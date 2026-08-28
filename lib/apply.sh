@@ -766,6 +766,15 @@ ap_record() {
 		excl=yes
 	fi
 
+	# The backup goes into the same block. graft's promise is that the project
+	# repo is left alone, and a backup directory sitting untracked in `git
+	# status` breaks that just as surely as the link would - worse, someone
+	# eventually sweeps it into a commit with `git add -A`. It is listed by its
+	# exact name, not a glob, so unlink can take that one line back out again.
+	if [ "$exclmode" = yes ] && [ -n "$backup" ] && [ "$backup" != '-' ]; then
+		ap_exclude_add "$checkout" "$(basename -- "$backup")" >/dev/null 2>&1 || :
+	fi
+
 	[ -n "$ST_FILE" ] || return 0
 	if prev=$(st_by_dest "$dest"); then
 		prev_backup=$(st_field "$prev" 7)
@@ -855,6 +864,11 @@ ap_unlink_at() {
 	if [ "$excl" = yes ]; then
 		rel=${dest#"$checkout"/}
 		[ "$rel" != "$dest" ] && ap_exclude_remove "$checkout" "$rel" >/dev/null 2>&1
+		# and the backup's own line, if we put one there
+		if [ -n "$backup" ]; then
+			ap_exclude_remove "$checkout" "$(basename -- "$backup")" \
+				>/dev/null 2>&1 || :
+		fi
 	fi
 
 	ap_rmdir_list "$checkout" "$made"
