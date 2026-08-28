@@ -709,9 +709,21 @@ EOS
 	[ -z "$output" ]
 }
 
-@test "probe: a directory that cannot hold a symlink is reported" {
+@test "probe: it separates 'no symlinks here' from 'cannot write here'" {
+	# Two causes that need two different fixes: one sends you to your
+	# filesystem, the other to chmod. Reporting both as the same thing sends
+	# half of the readers down the wrong path.
 	run ap_symlink_capable "$CO/does-not-exist"
-	assert_status 1
+	assert_status 2 # nowhere to write at all
+
+	mkdir -p "$CO/ro"
+	chmod 500 "$CO/ro"
+	run ap_symlink_capable "$CO/ro"
+	chmod 700 "$CO/ro"
+	assert_status 2 # write-protected, not a filesystem limitation
+
+	run ap_symlink_capable "$CO"
+	assert_status 0 # an ordinary directory on an ordinary filesystem
 }
 
 @test "probe: mv -T is detected where it really exists" {

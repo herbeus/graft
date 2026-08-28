@@ -520,7 +520,7 @@ plan_cmd_link() {
 
 	plan_execute
 	plan_counts
-	if [ "$PLAN_SHOWN" = 1 ] && [ "$GRAFT_JSON" != 1 ]; then
+	if [ "$PLAN_SHOWN" = 1 ] && [ "$GRAFT_JSON" != 1 ] && [ "$PLAN_R_DONE" -gt 0 ]; then
 		gr_say ""
 		gr_ok "$(gr_plural "$PLAN_R_DONE" "link in place" "links in place")"
 		# The plan was shown instead of the per-link lines, so the backup
@@ -529,6 +529,18 @@ plan_cmd_link() {
 	fi
 	plan_summary_line "did"
 	plan_print_setup_notes
+	# A filesystem that cannot hold a symlink is not drift to reconcile, it is
+	# an environment graft cannot work in - a different exit code, because the
+	# fix is a different one.
+	if [ "$PLAN_R_UNSUPPORTED" -gt 0 ]; then
+		if [ "$PLAN_R_ENVKIND" = unwritable ]; then
+			gr_hint "check the directory permissions, then run graft again"
+		else
+			gr_hint "graft needs POSIX symlinks; exFAT, some network mounts and"
+			gr_hint "Windows without Developer Mode cannot provide them"
+		fi
+		return "$GRAFT_EX_ENV"
+	fi
 	# A link that failed while being applied is drift too. Reporting success
 	# because the *plan* had no problems would be a lie about the disk.
 	[ "$PLAN_R_FAILED" -gt 0 ] && return "$GRAFT_EX_DRIFT"
@@ -539,7 +551,7 @@ plan_cmd_link() {
 plan_execute() {
 	local rec t checkout src dest_rel dest_abs action result
 	local backup exclude foreign
-	PLAN_R_DONE=0 PLAN_R_FAILED=0
+	PLAN_R_DONE=0 PLAN_R_FAILED=0 PLAN_R_UNSUPPORTED=0 PLAN_R_ENVKIND=""
 	while IFS= read -r rec; do
 		[ -n "$rec" ] || continue
 		t=$(plan_field "$rec" 1)
@@ -585,6 +597,9 @@ plan_execute() {
 				;;
 			*) gr_skip "$(gr_clean "$(plan_short_path "$dest_abs")")  $result  ($t)" ;;
 			esac
+		elif [ "$AP_RESULT" = unsupported ] || [ "$AP_RESULT" = unwritable ]; then
+			PLAN_R_UNSUPPORTED=$((PLAN_R_UNSUPPORTED + 1))
+			PLAN_R_ENVKIND="$AP_RESULT"
 		else
 			PLAN_R_FAILED=$((PLAN_R_FAILED + 1))
 			gr_warn "$(gr_clean "$(plan_short_path "$dest_abs")")  failed  ($t)"

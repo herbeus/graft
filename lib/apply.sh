@@ -75,12 +75,23 @@ ap_symlink_capable() {
 $AP_SYMLINK_CACHE
 EOF
 
+	# rc 0 = symlinks work, 1 = filesystem cannot do them, 2 = we cannot write
+	# here at all. The last one is worth separating: "no symlinks on this
+	# filesystem" and "you have no write permission" send the reader off to fix
+	# two completely different things.
 	rc=1
-	if [ -d "$dir" ]; then
+	if [ ! -d "$dir" ]; then
+		rc=2
+	else
 		probe=$(ap_tmpname "$dir" probe)
 		if ln -s -- .graft-probe "$probe" 2>/dev/null; then
 			rc=0
 			[ -L "$probe" ] && rm -- "$probe"
+		elif (: >"$probe.w") 2>/dev/null; then
+			rm -f -- "$probe.w"
+			rc=1
+		else
+			rc=2
 		fi
 	fi
 	AP_SYMLINK_CACHE="$AP_SYMLINK_CACHE$dir$AP_TAB$rc
@@ -690,12 +701,27 @@ ap_link() {
 	fi
 
 	# 4. symlinks must actually work here.
-	if ! ap_symlink_capable "$parent"; then
+	#    Reported as its own result word, not as a plain failure: this is the
+	#    environment being unusable (exFAT, a Windows checkout without the
+	#    privilege, a network mount), which is exit 4, not the drift that a
+	#    normal failure means. The distinction is what tells a user to fix
+	#    their filesystem rather than their config.
+	ap_symlink_capable "$parent"
+	case $? in
+	0) ;;
+	2)
+		ap_rmdir_list "$co_res" "$made"
+		ap_fail "cannot write in $(gr_clean "$parent")"
+		ap__say unwritable
+		return 1
+		;;
+	*)
 		ap_rmdir_list "$co_res" "$made"
 		ap_fail "the filesystem at $(gr_clean "$parent") does not support symlinks"
-		ap__say failed
+		ap__say unsupported
 		return 1
-	fi
+		;;
+	esac
 
 	# 7. move existing content aside. Never a delete, not even with --force:
 	#    a foreign symlink is somebody's decision and is restorable.

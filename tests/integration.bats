@@ -1109,3 +1109,21 @@ EOF
 	run grep -c graft "$FRONTEND/.git/info/exclude"
 	[ "$output" = 0 ]
 }
+
+@test "exit 4: an environment graft cannot work in, with the matching reason" {
+	# The spec always promised exit 4 for "environment cannot support graft",
+	# but the code reported plain drift (1) - which sends the reader off to fix
+	# their config instead of their filesystem.
+	world_basic
+	chmod 500 "$FRONTEND"
+
+	run "$GRAFT" link --yes frontend
+	chmod 700 "$FRONTEND"
+	assert_status 4
+	assert_output_contains "cannot write in"
+	assert_output_contains "permissions"
+	# no cheerful tick for a run that placed nothing
+	assert_output_lacks "in place"
+	# and no raw shell noise from the probe
+	assert_output_lacks "Permission denied"
+}
