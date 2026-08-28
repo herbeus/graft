@@ -44,7 +44,9 @@ correct for thirty years.
 
 **Where it wins:** if your destinations are fixed and few, stow plus a Makefile
 is less software than graft and does the mechanical part better. `stow --adopt`
-even moves an existing real file into the package for you.
+even moves an existing real file into the package for you - note that this is
+*not* what `graft adopt` does with a file git tracks: graft copies that one and
+leaves the deletion to a git commit you make yourself.
 
 **Where it stops:** stow's target is an argument. It has no idea what a git
 checkout is, so it cannot find one by remote URL, cannot check whether a
@@ -214,7 +216,7 @@ graft runs **across machines** and puts one directory into many checkouts.
     rulesync / ruler                    graft
     one repo, many formats              one context, many checkouts
 
-    .ruler/*.md                         context/web-app/
+    .ruler/*.md                         projects/web-app/github/
         |                                   |
         v  ruler apply                      v  graft link
     .github/copilot-instructions.md     ~/projects/web-app/.github

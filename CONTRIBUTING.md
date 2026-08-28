@@ -50,8 +50,12 @@ make lint          # shellcheck -s bash -S style
 make fmt           # shfmt -w -bn (reformat in place)
 make fmt-check     # shfmt -d -bn (fail if formatting is off)
 make test          # bats tests/
-bats tests/link.bats --filter 'dangling'   # one file, one test
+bats tests/apply.bats --filter 'dangling'  # one file, one test
 ```
+
+The suite is `tests/apply.bats`, `tests/config.bats`, `tests/discover.bats`,
+`tests/unlink.bats` and `tests/integration.bats`. The last one drives the real
+`bin/graft`; the others source `lib/` directly.
 
 `make install` links `bin/graft` into `~/.local/bin`; `make uninstall` removes
 it again. Both are wrappers around `./install.sh` and `./uninstall.sh`.
@@ -74,8 +78,24 @@ Concretely, do not use:
 | `printf -v arr[0]` | plain assignment |
 | `local -n` (nameref) | pass the value, or print it |
 
-CI runs the suite in a `bash:3.2` container so this is checked, not just
-requested. `set -euo pipefail` is fine; `pipefail` exists in 3.2.
+This is checked in CI, but be clear about what that check is worth. The `bash32`
+job does two static things in the `bash:3.2` image and no more:
+
+1. `bash -n` on every shell file, with real bash 3.2.57 - so a 4.x-only
+   *construct* cannot get merged;
+2. a `grep` for the constructs `bash -n` still accepts and 3.2 then chokes on at
+   runtime (`declare -A`, `local -A`, `mapfile`, `readarray`, `local -n`,
+   `${x^^}`/`${x,,}`, `&>>`).
+
+The **suite does not run** under bash 3.2 anywhere: the `bash:3.2` image has no
+git, and graft without git has nothing to do. Runtime coverage comes from the
+`test` job on ubuntu and macOS, which run whatever bash the runner ships. So a
+3.2 *behaviour* difference that is not one of the constructs above can still
+reach `main` - if you hit one, add it to the grep pattern in
+`.github/workflows/ci.yml` in the same PR.
+
+`set -euo pipefail` is fine; `pipefail` exists in 3.2, and pitfall P8 in
+`docs/pitfalls.md` is what it costs.
 
 Other house rules that shellcheck cannot enforce for you:
 

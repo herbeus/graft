@@ -49,9 +49,13 @@ in `docs/SPEC.md` section 1):
 - **No network (I2).** graft opens no sockets. No `git fetch`, no `curl`, no
   update check, no telemetry. It works offline and behaves identically on an
   air-gapped machine.
-- **Nothing is deleted (I3).** The only removal in the entire codebase is
-  `rm -- "$path"` on a path that has just been verified to be a symlink. There
-  is no `rm -r` anywhere. Your data is moved, never destroyed.
+- **Nothing of yours is deleted (I3).** On any path that came from your config,
+  from discovery or from the state file, the only removal is `rm -- "$path"` on
+  a path that has just been verified to be a symlink and to be ours. There is no
+  `rm -r` anywhere, and no `rm` is ever called on a real file or directory.
+  Your data is moved to a backup, never destroyed. graft does delete its own
+  scratch - probe symlinks and the temp file behind every atomic write - and the
+  table below lists every removal site there is.
 - **Containment (I4).** Every link source must resolve to a path strictly inside
   the context repo, and every destination to a path strictly inside its target
   checkout. Resolution happens before the check, so a symlink cannot be used to
@@ -106,12 +110,46 @@ review.
 - **Windows without WSL**, and filesystems without POSIX symlinks. Unsupported,
   not merely insecure.
 
+## Every removal site
+
+There are eight, and you can read all of them in an afternoon. This is the whole
+list; `grep` for it yourself with the commands in the next section.
+
+| site | what it removes | guard |
+|---|---|---|
+| `lib/apply.sh` `ap_symlink_capable` | the probe symlink it just created, to test whether the filesystem supports symlinks at all | `[ -L ]`, and the name is graft's own `.graft-probe.<pid>.<n>` |
+| `lib/apply.sh` `ap_symlink_capable` | the probe *file* it just created, to tell "this filesystem has no symlinks" apart from "I may not write here" | the name is that same probe name plus `.w` |
+| `lib/apply.sh` `ap_mv_no_target_dir` (two calls) | the two probe symlinks it just created, to test whether `mv -T` exists | `[ -L ]`, same naming |
+| `lib/apply.sh` `ap_link` | the temporary link it just created, after the rename onto the destination failed | `[ -L ]`, same naming |
+| `lib/apply.sh` `ap_replace` | the destination, on systems without `mv -T`, immediately before renaming the new link over it | `[ -L "$dest" ]` - a real file or directory has been moved to a backup long before this point |
+| `lib/apply.sh` `ap_unlink_at` | the destination, during `graft unlink` | `[ -L "$dest" ]` **and** the link resolves into the context repo |
+| `lib/core.sh` `gr_atomic_write` | its own temp file, when writing the state or cache file failed | the name is graft's own `.graft.tmp.<pid>`, in the directory it is writing to |
+
+Six of the eight remove something graft itself created seconds earlier, under a
+name it chose. The other two are the only places a *destination* can be removed,
+and neither can touch a real file: `[ -L ]` is asked first, every time.
+
+Empty directories graft created for a multi-segment destination are removed on
+`unlink` with `rmdir`, which refuses on a non-empty directory - never `rm -r`.
+
 ## Verifying this yourself
 
 ```sh
-grep -rn 'eval\|source \|\. "\$' bin lib     # expect: no config-derived input
-grep -rn 'rm ' bin lib                       # expect: one site, guarded by [ -L ]
-grep -rn 'curl\|wget\|git fetch\|nc ' bin lib # expect: nothing
+# nothing is interpreted: no eval at all, and the only `.` lines are the six in
+# bin/graft that source graft's own lib/*.sh by absolute path
+grep -rn 'eval\|source \|\. "\$' bin lib
+
+# every rm: expect nine lines - the eight sites in the table above, plus one
+# gr_say in lib/plan.sh that *prints* a `git rm -r --cached` command for you to
+# run yourself after `graft adopt`. graft never runs it.
+grep -rnE '(^|[^[:alnum:]_./-])rm ' bin lib | grep -vE ':[0-9]+:[[:space:]]*#'
+
+# graft never runs a recursive delete: expect two comments and that one printed
+# git command, and no executable `rm -r` of its own
+grep -rn 'rm -r' bin lib
+
+# no network
+grep -rn 'curl\|wget\|git fetch\|nc ' bin lib   # expect: nothing
 ```
 
 If one of those greps finds something the invariants do not allow, that is a bug

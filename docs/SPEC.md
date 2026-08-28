@@ -150,8 +150,9 @@ Lexical rules:
   - `${NAME}` expands to the environment variable `NAME` (`[A-Za-z_][A-Za-z0-9_]*`
     only) and only inside `path:` / `env:` strategy arguments and `search_root`.
     Undefined variable expands to empty, which makes the strategy fail softly.
-- Some keys are **repeatable** (`link`, `find`, `verify`). Order is preserved.
-  Repeating a non-repeatable key is an error naming both line numbers.
+- Some keys are **repeatable**: `link`, `find`, `verify` and `search_root`.
+  Order is preserved. Repeating a non-repeatable key is an error naming both
+  line numbers.
 - Comments are not allowed at end of a value line (a `#` inside a value is literal),
   because glob patterns legitimately contain `#`-free but confusing characters and
   a "sometimes a comment" rule is a footgun.
@@ -221,9 +222,17 @@ Value is `<strategy>:<argument>`. Evaluated top to bottom; first success wins.
 a prompt is the worst interaction in the tool this replaces. When nothing matches,
 graft prints the exact `--path name=DIR` invocation instead.
 
-Multiple candidates for one target: never auto-pick. Interactive -> numbered list
-with each candidate's origin URL and last commit date. Non-interactive -> skip with
-a warning and exit 1.
+Multiple candidates for one target: never auto-pick. Numbered list with each
+candidate's origin URL and relative last-commit time (`git log -1 --format=%cr`),
+offered **only** by `graft link`, only at a terminal, and not under `--dry-run`,
+`--no-input`, `--json` or `CI` - `status` and previews must stay safe to pipe.
+A choice is pinned in the cache exactly as `--path` would be. Everywhere else:
+list the candidates, print the `--path` command, record the target as
+`ambiguous`, exit 1.
+
+Nothing matches: record `no-checkout` and print every `find` strategy that was
+tried, in order, plus the `--path` command. `require = yes` makes that a problem
+(exit 1); otherwise it is a skip.
 
 ### 4.5 `[setup "name"]`
 
@@ -244,14 +253,41 @@ graft [link] [<target>...] [flags]   reconcile: create/repair links
 graft status [<target>...]           report only, never writes
 graft check                          validate graft.conf, never touches the FS
 graft unlink [<target>...]           remove our links, restore backups
-graft adopt <dir> --as <target>      move an existing dir into the context repo
+graft adopt <dir> --as <target>      take an existing dir into the context repo
 graft init                           scaffold graft.conf
 graft version | help
 ```
 
-Bare `graft` == `graft link`. The first `link` run for a given config asks for
-confirmation once (shows the plan); after that it is silent unless something
-changes. Non-interactive without `--yes`: print plan, change nothing, exit 3.
+Bare `graft` == `graft link`. The first `link` run for a given config (no state
+file yet) shows the plan and asks once; it does not repeat the plan afterwards,
+it prints `N links in place`. Later runs print per-link lines only when something
+is not already correct; the single-line `N links are up to date, nothing to do`
+is reserved for a run with no change, no problem and no skip. Non-interactive
+without `--yes`: print plan, change nothing, exit 3.
+
+A target with `confirm = yes` is asked about separately, once per target, the
+first time that target would change something - the answer is remembered for the
+rest of the run.
+
+### 5.0 `adopt`
+
+`adopt <path> --as <target>` is the only way out of a tracked destination, and
+what it does depends on git:
+
+- **tracked** -> `cp -R` into the context repo, the original untouched, then
+  print the three steps that finish the job (commit here; `git rm -r --cached`
+  plus a commit there; `graft link <target>`). It must not `mv`: that would stage
+  the deletion of files graft does not own, in a repo it was invited into, and
+  no `unlink` could restore them. Only git may remove them.
+- **untracked** -> `mv` into the context repo, then `ap_link` it straight back,
+  then print the one commit that shares it.
+
+Preconditions, each an exit 2 with a copyable snippet rather than a guess:
+the path exists and is not already a symlink; it is inside a git checkout; the
+named `[target]` exists; one of that target's `link` rules has exactly this
+destination (that rule, not `adopt`, decides where in the context repo the
+content lands); and the resulting source path is still free. `--dry-run` prints
+the plan and returns 0.
 
 ### 5.1 Global flags
 
@@ -280,8 +316,21 @@ relaxes I5 (tracked paths) and never suppresses backups.
 | 1 | drift or conflict remains (foreign link, missing checkout with `require`) |
 | 2 | usage error or invalid config |
 | 3 | changes required but not confirmed (non-interactive without `--yes`) |
-| 4 | environment cannot support graft (no symlinks, unreadable context repo) |
+| 4 | environment cannot support graft (see below) |
 | 130 | interrupted |
+
+Exit 4 has exactly four causes, and nothing else may claim it:
+
+- a destination's parent directory is on a filesystem that cannot hold symlinks
+  (`ap_symlink_capable` returns 1, `ap_link` says `unsupported`);
+- a destination's parent directory is not writable at all (`ap_symlink_capable`
+  returns 2, `ap_link` says `unwritable`);
+- `adopt` failed on I/O: `mkdir`, `cp -R` or `mv` returned non-zero;
+- `bin/graft` cannot find its own `lib/` (checked before anything is sourced).
+
+An unreadable or missing `graft.conf` is exit **2**, not 4 - `graft_need_config`
+reports it as a usage error. Any other failure while applying a link is drift:
+`plan_execute` counts it in `PLAN_R_FAILED` and the run exits 1.
 
 Exit codes are part of the public API. Human-readable output is not.
 
@@ -296,8 +345,13 @@ For one (target, link spec) pair. `SRC` = resolved source, `DST` = destination.
     (a dangling link is worse than no link: tools see .github and find nothing)
 2.  containment checks I4 for SRC and DST; deny-list check
 3.  if DST is tracked by git -> conflict "tracked", stop (I5, no override)
-4.  probe symlink capability in dirname(DST) once per checkout; if unsupported
-    -> exit 4 with a diagnosis
+4.  probe symlink capability in dirname(DST), once per directory, cached for the
+    run. Three outcomes, and the last two are told apart on purpose because they
+    send the reader off to fix different things:
+      symlinks work                     -> continue
+      cannot create a symlink, but a
+        plain file can be created here  -> "unsupported", exit 4
+      cannot create anything here       -> "unwritable", exit 4
 5.  classify DST, checking -L BEFORE -e (a dangling symlink is not -e):
       not present            -> CREATE
       symlink -> resolves to SRC              -> UNCHANGED
@@ -361,7 +415,7 @@ A tool that scans `$HOME` and creates symlinks MUST cage its own test suite.
 `tests/helpers/sandbox.bash` refuses to run if `$HOME` is not under `$BATS_TMPDIR`.
 
 Required coverage, at minimum: every row of section 6 step 5, every invariant in
-section 1, and the five historical bugs in `docs/pitfalls.md`.
+section 1, and the eight historical bugs P1-P8 in `docs/pitfalls.md`.
 
 ---
 
@@ -464,7 +518,9 @@ acting on a record.
 ```
 ap_symlink_capable <dir>
     Probes by creating and removing a symlink in <dir>. Result cached per
-    directory for the run. Returns 1 where symlinks are unavailable.
+    directory for the run. Returns 0 when symlinks work, 1 when the filesystem
+    cannot hold one (a plain file still can be created), 2 when nothing can be
+    written there at all.
 
 ap_dest_state <dest> <src-resolved> <ctx-root>
     Classifies a destination without touching it. Prints exactly one word:
@@ -486,7 +542,9 @@ ap_set_context <ctx-root>
 ap_link <target> <checkout> <src> <dest-rel> <backup-mode> <exclude> <foreign> [ctx]
     Performs one link according to docs/SPEC.md section 6 and records state.
     Prints one result word on stdout: created repaired unchanged backed-up
-    skipped-foreign skipped-tracked failed
+    skipped-foreign skipped-tracked unsupported unwritable failed
+    The last three are the caller's cue for the exit code: unsupported and
+    unwritable mean exit 4, failed means exit 1.
 
 ap_unlink_record <record>
     Reverses one state record, verifying the filesystem at each step.

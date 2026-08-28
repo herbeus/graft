@@ -15,7 +15,7 @@ graft link
 ```
 
 ```
-  ✓ 7 links up to date, nothing to do
+✓ 5 links are up to date, nothing to do
 ```
 
 ---
@@ -64,7 +64,8 @@ graft check                              # validate before touching anything
 graft link
 ```
 
-A first run always shows the plan and asks:
+The first run for a given config shows the plan and asks once. It does not print
+the list a second time afterwards - it tells you what it ended up doing:
 
 ```
 $ graft link
@@ -75,36 +76,48 @@ plan
   + ~/work/payments-api/.github  (api)
   + ~/work/payments-api/CLAUDE.md  (api)
 apply 5 change(s)? [y/N] y
-  + ~/projects/web-app/.github  (web-app)
-  + ~/projects/web-app/CLAUDE.md  (web-app)
-  + ~/projects/web-app/.cursor/rules  (web-app)
-  + ~/work/payments-api/.github  (api)
-  + ~/work/payments-api/CLAUDE.md  (api)
+
+  ✓ 5 links in place
 
 next steps (graft never runs these for you)
   install the local MCP servers (asks for your personal token)
-      /home/you/context/context/setup/install-mcp.sh
+      /home/you/context/projects/setup/install-mcp.sh
 ```
 
 Every run after that, in your `git pull` habit or a shell alias:
 
 ```
 $ graft
-  ✓ 5 links up to date, nothing to do
+✓ 5 links are up to date, nothing to do
 ```
 
 One line. A tool that is chatty when nothing happened trains you to stop reading
-it, and then you miss the run that mattered.
+it, and then you miss the run that mattered. That one line is reserved for the
+case where there is genuinely nothing left to say: no change, no conflict, no
+skipped target.
 
-When something has drifted, that is the only thing you hear about:
+As soon as anything does need doing, you get the whole picture again - what
+changed, what was already right, and what needs a decision from you:
 
 ```
 $ graft
   ~ ~/projects/web-app/.github  repointed  (web-app)
+  ✓ ~/projects/web-app/CLAUDE.md  (web-app)
+  ✓ ~/projects/web-app/.cursor/rules  (web-app)
+  ✓ ~/work/payments-api/.github  (api)
   ! ~/work/payments-api/CLAUDE.md  tracked by git, refused  (api)
+      git tracks this path, so a symlink here would commit a deletion.
+      move it into the context repo instead: graft adopt /home/you/work/payments-api/CLAUDE.md --as api
 
-1 did change, 3 already correct, 1 need attention
+1 changed, 3 already correct, 1 needs attention
+
+next steps (graft never runs these for you)
+  install the local MCP servers (asks for your personal token)
+      /home/you/context/projects/setup/install-mcp.sh
 ```
+
+That run exits 1: the tracked destination is still unresolved. The `[setup]`
+reminder comes back on every run that did something, which is the point of it.
 
 Undo it all, on this machine, at any time:
 
@@ -119,10 +132,11 @@ committed: there are no machine-specific paths in it.
 
 ```ini
 [defaults]
-source_root = context
+source_root = projects
 search_root = ~/projects
+search_root = ~/work
 search_depth = 3
-link = . -> .github
+link = github -> .github
 backup = timestamp
 git_exclude = yes
 
@@ -146,16 +160,38 @@ description = install the local MCP servers (asks for your personal token)
 run = setup/install-mcp.sh
 ```
 
+That is the layout `graft init` scaffolds, and the one `examples/minimal/` uses:
+
+```
+context/                        your context repo
+  graft.conf
+  projects/                     source_root
+    web-app/                    source dir of target "web-app"
+      github/                   -> linked into the checkout as .github
+      CLAUDE.md                 -> linked into the checkout as CLAUDE.md
+      cursor-rules/             -> linked into the checkout as .cursor/rules
+    api/
+      github/
+      CLAUDE.md
+    setup/install-mcp.sh
+```
+
 Reading it back:
 
-- `source_root = context` - the shared content lives in `context/` next to this
-  file. Each target's source directory is `context/<target-name>`, unless the
-  target sets `source`.
-- `link = . -> .github` in `[defaults]` - every target links its whole source
-  directory in as `.github`. The left side is relative to the source directory,
-  the right side to the checkout root; `.` means the whole directory. Targets
-  add their own `link` lines, and a `link = !.cursor/rules` line drops an
-  inherited one.
+- `source_root = projects` - the shared content lives in `projects/` next to this
+  file. Each target's source directory is `projects/<target-name>`, unless the
+  target sets `source`. It is the context repo's own folder of per-target
+  content and has nothing to do with where your checkouts live; that is
+  `search_root`.
+- `link = github -> .github` in `[defaults]` - every target links its own
+  `github/` subdirectory in as `.github`. The left side is relative to the
+  target's source directory, the right side to the checkout root. Targets add
+  their own `link` lines, and a `link = !.cursor/rules` line drops an inherited
+  one. (`.` on the left is legal too and means the whole source directory - but
+  then every file in it lands in `.github`, including your `CLAUDE.md`.)
+- `search_root` is repeatable; so are `link`, `find` and `verify`. Every other
+  key may appear at most once per section, and repeating one is an error that
+  names both line numbers.
 - `find = origin:*github.com/OWNER/web-app` - this is the part that makes the
   file shareable. graft matches the *git remote URL*, so your colleague who
   keeps everything in `~/src/` needs no changes. Several `find` lines are tried
@@ -164,6 +200,34 @@ Reading it back:
   Cheap insurance against a fork, an archive or a half-deleted clone.
 - `[setup]` entries are **printed** after a successful run. graft never runs
   them. That is not an oversight, it is the point.
+
+Four more keys are worth knowing about, because each changes what a run does:
+
+- `description = ...` on a target is not decoration: `graft status` groups its
+  output by target and prints this line above each group.
+- `confirm = yes` on a target makes graft ask before it changes anything for
+  that target - once per run, not once per link. Answer no and you get
+  `- <target>: skipped on request`.
+- `on_foreign_link = abort` (default `warn`). A destination that is already a
+  symlink pointing outside your context repo is somebody's decision. `warn`
+  reports it, leaves it alone and links everything else; `abort` refuses the
+  entire run so that nothing is half-applied. `--force` overrides both, and
+  moves the foreign link to a backup rather than deleting it.
+- `backup_suffix = .graft-backup` in `[defaults]` names every backup graft
+  makes. With `backup = suffix` you get `CLAUDE.md.graft-backup`; with
+  `backup = timestamp` (the default) you get
+  `CLAUDE.md.graft-backup.20260828T075903Z`. `backup = abort` refuses instead of
+  moving anything aside. `graft unlink` finds the backups by that same suffix,
+  so change it in `[defaults]` and leave it alone afterwards.
+
+After a run that moved something aside, graft says where it went, because the
+exclude block hides backups from `git status`:
+
+```
+your content that graft moved aside
+  ~/work/payments-api/CLAUDE.md.graft-backup.20260828T080137Z
+  graft unlink puts these back; they are hidden from git status until then
+```
 
 `docs/SPEC.md` section 4 is the full reference. A complete, runnable example is
 in [`examples/minimal/`](examples/minimal/).
@@ -175,14 +239,63 @@ graft [link] [<target>...]   create and repair the configured links
 graft status [<target>...]   show what is linked, drifted or missing
 graft check                  validate graft.conf, touch nothing
 graft unlink [<target>...]   remove our links and restore backups
-graft adopt <dir> --as NAME  move an existing dir into the context repo
+graft adopt <dir> --as NAME  take an existing dir into the context repo
 graft init                   write a starter graft.conf
 graft help | version
 ```
 
+`graft status` never writes. It groups its lines by target and puts each
+target's `description` above its group, which is the one place that key earns
+its keep:
+
+```
+$ graft status
+context: /home/you/context
+web-app - customer-facing frontend
+  ✓ ~/projects/web-app/.github  (web-app)
+  ✓ ~/projects/web-app/CLAUDE.md  (web-app)
+  ✓ ~/projects/web-app/.cursor/rules  (web-app)
+api - payments API
+  ✓ ~/work/payments-api/.github  (api)
+  ! ~/work/payments-api/CLAUDE.md  tracked by git, refused  (api)
+      git tracks this path, so a symlink here would commit a deletion.
+      move it into the context repo instead: graft adopt /home/you/work/payments-api/CLAUDE.md --as api
+
+4 already correct, 1 needs attention
+```
+
 Useful flags: `-n/--dry-run`, `-y/--yes`, `--path NAME=DIR` (pin a checkout
 graft could not find), `--rescan` (ignore the discovery cache), `--only NAME`
-(one destination), `--json` (JSON Lines, for scripts), `-q`, `--no-color`.
+(one destination, by its basename - it applies to `unlink` too), `--force`
+(replace foreign symlinks, never tracked files), `--json` (JSON Lines, for
+scripts), `-q`, `--no-color`.
+
+`graft unlink` is symmetrical with the rest: `--dry-run` prints
+`- would remove <path>` lines and a `N links would be removed` summary without
+touching anything, `--only` restricts it to one destination name, and it works
+even when the state file is gone. In that case it falls back to what it can
+still recognise on disk - a symlink in a resolved checkout that points into your
+context repo - and says so:
+
+```
+$ graft unlink
+  ✓ ~/projects/web-app/.github  link removed (no state, matched by target)
+1 link removed
+```
+
+That fallback still restores a backup, but only when exactly one candidate next
+to the destination carries the configured `backup_suffix`. Two candidates, or
+one with a different suffix, and it removes the link and leaves them alone -
+guessing there would move a stranger's directory onto a path you are still
+using.
+
+Three environment variables, all of which have a flag equivalent:
+
+| variable | effect |
+|---|---|
+| `GRAFT_CONFIG` | path to `graft.conf`, same as `--config`. `-C` wins over it. |
+| `NO_COLOR` | any value disables ANSI colour, same as `--no-color` |
+| `CI` | any value implies `--no-input`, so a run that would need a question exits 3 instead of hanging |
 
 Exit codes are part of the public API, so `graft status` works in a shell
 condition:
@@ -190,10 +303,39 @@ condition:
 | code | meaning |
 |---|---|
 | 0 | success, desired state reached |
-| 1 | drift or conflict remains |
+| 1 | drift or conflict remains - and that includes a link that failed while being applied |
 | 2 | usage error or invalid config |
 | 3 | changes required but not confirmed (non-interactive without `--yes`) |
-| 4 | environment cannot support graft (no symlinks) |
+| 4 | the environment cannot support graft |
+| 130 | interrupted (`Ctrl-C`) |
+
+Exit 4 means "do not bother re-running until you have changed something outside
+graft", and it has exactly four causes: a destination directory on a filesystem
+that cannot hold symlinks, a destination directory graft is not allowed to write
+in, an `adopt` whose copy or move failed on I/O, and a broken installation where
+`bin/graft` cannot find its own `lib/`. graft probes the two filesystem cases
+per directory, before it creates anything, and tells them apart on purpose -
+they send you off to fix two completely different things:
+
+```
+$ graft link --yes
+plan
+  + ~/mnt/exfat/repo/.github  (media)
+graft: the filesystem at /home/you/mnt/exfat/repo does not support symlinks
+      graft needs POSIX symlinks; exFAT, some network mounts and
+      Windows without Developer Mode cannot provide them
+```
+
+```
+$ graft link --yes
+plan
+  + ~/srv/shared/repo/.github  (shared)
+graft: cannot write in /home/you/srv/shared/repo
+      check the directory permissions, then run graft again
+```
+
+Everything else that goes wrong on disk is drift, not environment: a link that
+fails for any other reason is reported as `failed` and makes the run exit 1.
 
 ## How discovery works
 
@@ -220,12 +362,50 @@ Then every `verify` path of the target must exist in the candidate, or it is
 rejected.
 
 Two things graft will not do here. It never **auto-picks** between several
-matching checkouts - interactively it lists them with their origin URL and last
-commit date and asks; non-interactively it skips and exits 1. And there is no
-`ask:` strategy: typing an unfamiliar path at a prompt with no tab completion is
-the worst interaction in the tool this replaces. When nothing matches, graft
-says so and hands you the exact command to pin it instead of prompting:
-`graft --path api=/path/to/checkout`, which is remembered in the cache.
+matching checkouts, and there is no `ask:` strategy: typing an unfamiliar path at
+a prompt with no tab completion is the worst interaction in the tool this
+replaces.
+
+Several checkouts match, at a terminal, during `graft link`: a numbered list with
+each candidate's origin URL and how long ago it was last committed to.
+
+```
+web-app matches more than one checkout:
+  1) ~/projects/a/web-app
+     https://github.com/OWNER/web-app.git, last commit 11 seconds ago
+  2) ~/projects/b/web-app
+     https://github.com/OWNER/web-app.git, last commit 11 seconds ago
+  pick 1-2, or anything else to skip:
+```
+
+Anything that is not one of the offered numbers skips the target. The choice is
+remembered in the cache, exactly as if you had passed `--path`. Only `graft link`
+asks: `status` and `--dry-run` are meant to be safe to pipe, and a preview that
+blocks on a question is not. Everywhere else - and in `link` under `--json`,
+`--no-input`, `CI` or a pipe - you get the list and the command instead, and
+exit 1:
+
+```
+  ! web-app: 2 checkouts match - graft will not pick one for you
+      ~/projects/a/web-app
+      ~/projects/b/web-app
+      choose one: graft --path web-app=<directory>
+```
+
+Nothing matches: graft names every strategy it tried, in the order it tried
+them, because a pattern that cannot match is the usual cause. Then it hands you
+the command to pin the checkout, which is remembered in the cache:
+
+```
+  - gone: no checkout found
+      tried: origin:*/never-here
+      tried: dir:/home/you/projects/nowhere
+      point at it directly: graft --path gone=<directory>
+```
+
+`graft status` is where that list always appears. `graft link` counts the target
+as skipped and shows the count, but leaves the diagnosis to `status`. A target
+with `require = yes` is a problem rather than a skip, and makes the run exit 1.
 
 ## What graft never does
 
@@ -241,11 +421,15 @@ create or refuse a symlink.
 **I2 - It never touches the network.** No `git fetch`, no `curl`, no update
 check, no telemetry. It behaves identically on an air-gapped machine.
 
-**I3 - It never deletes your data.** The single removal site in the entire
-codebase is `rm -- "$path"`, guarded by a check that the path is a symlink.
-There is no `rm -r` anywhere. An existing real file or directory at a
+**I3 - It never deletes your data.** On any path that came from your
+configuration, from discovery or from the state file, the only removal graft
+performs is `rm -- "$path"` on a path it has just checked is a symlink and knows
+is ours. There is no `rm -r` anywhere. An existing real file or directory at a
 destination is *moved* to a backup and recorded, so `graft unlink` can move it
-back.
+back. The one thing graft does delete outright is its own scratch: the probe
+symlinks it creates to test a filesystem, and the temporary file every atomic
+write goes through - all in a directory it is already writing to, under a name it
+chose moments earlier. `SECURITY.md` lists every removal site.
 
 **I4 - It cannot escape the two directories it works in.** Every link source
 must resolve inside the context repo, every destination inside its checkout, and
@@ -272,9 +456,68 @@ the tool refusing to do the thing it exists for:
 > commit that deletes their CI, and learns why. graft just says no instead.
 
 If you genuinely want a tracked directory to become a link, `graft adopt` is the
-supported route: it moves the real directory into the context repo, then links
-it back, so the deletion is an explicit, reviewable commit that you make on
-purpose.
+supported route. What it does depends on whether git is tracking the thing, and
+the difference matters:
+
+**Tracked - it is copied, and your repository is not touched at all.** graft
+writes a copy into the context repo, leaves the original exactly where it is,
+and prints the three git commands that finish the job:
+
+```
+$ graft adopt ~/work/payments-api/CLAUDE.md --as api
+plan
+  copy ~/work/payments-api/CLAUDE.md
+    to ~/context/projects/api/CLAUDE.md
+  leave the original alone - it is tracked, so only git may remove it
+adopt CLAUDE.md into target 'api'? [y/N] y
+  ✓ copied into the context repo (your repo is untouched)
+
+three steps to finish, in this order
+  1. commit it here:
+       git -C /home/you/context add projects/api/CLAUDE.md && git -C /home/you/context commit -m "adopt api/CLAUDE.md"
+  2. stop tracking it over there - git removes it, graft never does:
+       git -C /home/you/work/payments-api rm -r --cached -- CLAUDE.md
+       git -C /home/you/work/payments-api commit -m "move CLAUDE.md into the shared context repo"
+  3. then: graft link api
+```
+
+`git status` in the project repo is clean afterwards. This is not timidity: a
+move would stage the deletion of tracked files graft does not own, in a
+repository it was invited into, and no `graft unlink` could ever hand them back
+- only a `git checkout` could. So graft copies, and leaves the deletion to git
+and to you, as an explicit, reviewable commit. That is also why step 2 comes
+after step 1: until the content is committed in the context repo, it exists in
+only one place.
+
+**Untracked - it is moved and linked back in one step**, because there is no
+deletion for anyone to commit:
+
+```
+$ graft adopt ~/projects/web-app/.github --as web-app
+plan
+  move ~/projects/web-app/.github
+    to ~/context/projects/web-app/github
+  then link it back
+adopt .github into target 'web-app'? [y/N] y
+  ✓ moved into the context repo
+  ✓ linked back: ~/projects/web-app/.github
+
+commit it in the context repo, then your colleagues get it too:
+  git -C /home/you/context add projects/web-app/github && git -C /home/you/context commit -m "adopt web-app/.github"
+```
+
+`adopt` does not invent a layout. It refuses, with exit code 2 and a copyable
+snippet, unless your `graft.conf` already answers both questions:
+
+- the `[target]` you named exists, and
+- one of its `link` rules has this exact destination. That rule is what decides
+  where in the context repo the content lands - `link = github -> .github` puts
+  `.github` at `projects/<target>/github`, and nowhere else.
+
+It also refuses if that source path is already occupied
+(`already present in the context repo` - merging two versions is your call), if
+the path is already a symlink, or if it is not inside a git checkout at all.
+`--dry-run` prints the plan and stops.
 
 ## Do you even need this?
 
@@ -339,7 +582,7 @@ the other axis.
     rulesync / ruler                    graft
     one repo, many formats              one context, many checkouts
 
-    .ruler/*.md                         context/web-app/
+    .ruler/*.md                         projects/web-app/github/
         |                                   |
         v  ruler apply                      v  graft link
     .github/copilot-instructions.md     ~/projects/web-app/.github
@@ -368,11 +611,14 @@ link = AGENTS.md -> CLAUDE.md
 
 ## Requirements
 
-- **bash 3.2 or newer.** macOS still ships 3.2 as `/bin/bash`, and CI tests
-  against it in a container, so a stock Mac works with nothing installed.
+- **bash 3.2 or newer.** macOS still ships 3.2 as `/bin/bash`. CI parses every
+  shell file with a real bash 3.2.57 and rejects bash 4+ syntax, and runs the
+  full test suite on macOS, so a stock Mac works with nothing installed.
 - **git**, any version from the last decade.
 - **A filesystem with POSIX symlinks.** graft probes for symlink support once
-  per checkout and exits 4 with a diagnosis if it is missing.
+  per directory it is about to link into, names the directory in the error, and
+  exits 4 - separately from "I am not allowed to write here", which is the other
+  thing that probe can discover.
 - Standard POSIX tools: `find`, `awk`, `sed`, `grep`, `cut`, `cksum`.
 - **Linux, macOS or WSL.** Native Windows is not supported and is not planned:
   the whole tool is symlinks, and that story is different enough on Windows that

@@ -58,8 +58,12 @@ rm -rf vlink/        # deletes the CONTENTS of `real`
 With a trailing slash the shell follows the symlink. In a tool whose sources live
 in the context repo, this deletes the shared context for everyone.
 
-Guard: graft never calls `rm -r` at all. The single deletion site is
-`rm -- "$p"` after `[ -L "$p" ]`, with `p` normalised via `${p%/}`.
+Guard: graft never calls `rm -r` at all, and never calls `rm` on a real file or
+directory. Every destination it removes is normalised via `${p%/}` and removed
+with `rm -- "$p"` only after `[ -L "$p" ]` says it is a symlink. Empty parents
+graft itself created go away with `rmdir`, which refuses a non-empty directory.
+(graft does also remove its own probe symlinks and temp files - `SECURITY.md`
+lists every removal site there is.)
 
 Test: `unlink: never deletes a real directory, only our symlink`
 
@@ -93,7 +97,9 @@ not, remove the symlink first and then `mv`. That fallback loses atomicity but
 never nests, and a non-atomic window is a far smaller problem than a link
 silently landing inside the shared context repo.
 
-Test: `link: replacing a directory symlink does not nest (mv -T and fallback)`
+Tests, one per branch of the probe:
+`link: a real mv without -T replaces a directory symlink without nesting` and
+`link: the mv -T fallback replaces a directory symlink without nesting`
 
 ## P8 - `producer | grep -q` under `set -o pipefail`
 

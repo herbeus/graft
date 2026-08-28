@@ -654,7 +654,13 @@ plan_summary_line() {
 		gr_say ""
 		local parts=""
 		if [ "$PLAN_N_CHANGE" -gt 0 ]; then
-			parts=$(gr_plural "$PLAN_N_CHANGE" "change $verb" "changes $verb")
+			# Not a verb spliced into a noun phrase: "1 change did" is not
+			# English, and this line is read on every run that has anything
+			# to report.
+			case "$verb" in
+			did) parts="$PLAN_N_CHANGE changed" ;;
+			*) parts="$PLAN_N_CHANGE to change" ;;
+			esac
 		fi
 		if [ "$PLAN_N_OK" -gt 0 ]; then
 			parts="${parts:+$parts, }$PLAN_N_OK already correct"
