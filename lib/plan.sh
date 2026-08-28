@@ -632,8 +632,17 @@ plan_execute() {
 			continue
 		fi
 		plan_is_change "$action" || {
-			if [ "$action" = unchanged ] && [ "$PLAN_SHOWN" = 0 ]; then
-				gr_ok "$(gr_clean "$(plan_short_path "$dest_abs")")  ($t)"
+			if [ "$PLAN_SHOWN" = 0 ]; then
+				if [ "$action" = unchanged ]; then
+					gr_ok "$(gr_clean "$(plan_short_path "$dest_abs")")  ($t)"
+				else
+					# A skipped target explained nowhere is why a first run
+					# reads "1 skipped" and nothing else. Say it here, where
+					# the user is looking, instead of in a command they do
+					# not yet know exists.
+					plan_render_line "$t" "$checkout" "$src" "$dest_rel" \
+						"$dest_abs" "$action" "$(plan_field "$rec" 7)"
+				fi
 			fi
 			continue
 		}
@@ -1108,9 +1117,23 @@ find = origin:*/example
 # description = install the team MCP servers (needs a personal token)
 # run = mcp/install.sh
 TEMPLATE
+	# Create the directory the file talks about. A scaffold that describes a
+	# layout without making it leaves the first `graft link` with nothing to
+	# link and nothing to say, which is where people conclude it is broken.
+	mkdir -p -- "$PWD/projects/example/github"
+	if [ ! -e "$PWD/projects/example/github/copilot-instructions.md" ]; then
+		cat >"$PWD/projects/example/github/copilot-instructions.md" <<'SAMPLE'
+# House rules
+
+Replace this file with the instructions your agents should follow in this
+project. Everything under this directory is linked into the checkout as
+`.github/`, so put skills, agents and prompts here too.
+SAMPLE
+	fi
 	gr_ok "wrote $(gr_clean "$conf")"
+	gr_ok "created projects/example/github/ with a sample file"
 	gr_say ""
-	gr_say "next: put your shared context under $(gr_clean "$PWD")/projects/<name>/github/,"
-	gr_say "      edit the [target] block, then run: graft check && graft link --dry-run"
+	gr_say "next: rename projects/example to your project, point the [target] block"
+	gr_say "      at its git remote, then run: graft check && graft link --dry-run"
 	return 0
 }

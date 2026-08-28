@@ -226,15 +226,42 @@ graft_need_config() {
 
 # --- commands -----------------------------------------------------------------
 
+# Validating only the grammar is not much of a check: the commonest mistake is
+# a source directory that does not exist, and a green tick for a config whose
+# every link points at nothing is worse than no check at all.
+graft_check_sources() {
+	local t spec src missing=0
+	while IFS= read -r t; do
+		[ -n "$t" ] || continue
+		while IFS= read -r spec; do
+			[ -n "$spec" ] || continue
+			src=${spec%%	*}
+			{ [ -e "$src" ] || [ -L "$src" ]; } && continue
+			missing=$((missing + 1))
+			gr_warn "$t: source does not exist: $(gr_clean "${src#"$CFG_CTX_ROOT"/}")"
+		done <<EOF
+$(cfg_target_links "$t")
+EOF
+	done <<EOF
+$(cfg_targets)
+EOF
+	[ "$missing" = 0 ] && return 0
+	gr_hint "create it under $(gr_clean "${CFG_SOURCE_ROOT#"$CFG_CTX_ROOT"/}")/, or fix the link line"
+	return 1
+}
+
 cmd_check() {
-	local nt ns
+	local nt ns rc=0
 	graft_need_config
 	nt=$(cfg_targets | grep -c . || true)
 	ns=$(cfg_setups | grep -c . || true)
 	gr_say "graft.conf: $(gr_clean "$CFG_FILE")"
-	gr_ok "syntax and schema are valid"
+	graft_check_sources || rc="$GRAFT_EX_DRIFT"
+	if [ "$rc" = 0 ]; then
+		gr_ok "syntax, schema and sources are all in order"
+	fi
 	gr_dim "  $(gr_plural "$nt" target targets), $(gr_plural "$ns" "setup note" "setup notes")"
-	return 0
+	return "$rc"
 }
 
 cmd_version() {

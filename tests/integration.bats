@@ -227,7 +227,7 @@ EOF
 
 	run "$GRAFT" check
 	assert_status 0
-	assert_output_contains "valid"
+	assert_output_contains "in order"
 
 	run "$GRAFT" link --dry-run
 	assert_status 0
@@ -860,7 +860,7 @@ EOF
 
 	run "$GRAFT" check
 	assert_status 0
-	assert_output_contains "valid"
+	assert_output_contains "in order"
 
 	# Running it twice must not overwrite the file the user just edited.
 	printf '\n# mine\n' >>"$HOME/fresh/graft.conf"
@@ -1214,4 +1214,36 @@ EOF
 	assert_status 0
 	[ -L "$FRONTEND/.claude" ]
 	[ -L "$FRONTEND/.github" ]
+}
+
+@test "check reports a source that does not exist" {
+	# Validating only the grammar is not much of a check: the commonest mistake
+	# is a source directory that is not there, and a green tick for a config
+	# whose links all point at nothing is worse than no check at all.
+	world_basic
+	rm -rf "$CTX/projects/frontend/github"
+
+	run "$GRAFT" check
+	assert_status 1
+	assert_output_contains "source does not exist"
+	assert_output_contains "projects/frontend/github"
+}
+
+@test "init scaffolds the layout it describes, and link explains the skip" {
+	# The first run used to print a blank line and '1 skipped', exit 0, with no
+	# diagnosis anywhere - the point at which people decide it is broken.
+	mkdir -p "$HOME/fresh"
+	cd "$HOME/fresh" || return 1
+
+	run "$GRAFT" init
+	assert_status 0
+	[ -f "$HOME/fresh/projects/example/github/copilot-instructions.md" ]
+
+	run "$GRAFT" check
+	assert_status 0
+
+	run "$GRAFT" link --yes
+	assert_output_contains "no checkout found"
+	assert_output_contains "tried:"
+	assert_output_contains "--path example="
 }
