@@ -748,14 +748,18 @@ assert_no_errors() {
 }
 
 @test "config: a tab or a backslash inside a value survives the TSV round trip" {
-	# CFG_DATA is tab separated, so both characters have to be escaped and
-	# decoded again in the right order.
+	# The readers hand back the value untouched, and the CFG_DATA rendering
+	# SPEC 9.1 promises escapes both characters - a literal backslash first, so
+	# that "\\t" in the file does not come back out as a tab.
 	printf '[target "demo"]\ndescription = a\tb \\ c \\\\t d\n' >"$CTX/graft.conf"
 	rc=0
 	cfg_load "$CTX/graft.conf" || rc=$?
 	assert_no_errors
 	run cfg_get "target:demo" description
 	[ "$output" = "$(printf 'a\tb \\ c \\\\t d')" ]
+	# section \t key \t escaped-value \t lineno. The single quoted middle is
+	# the escaping itself: tab -> \t and each backslash doubled.
+	[ "$CFG_DATA" = "target:demo${CFG_TAB}description${CFG_TAB}"'a\tb \\ c \\\\t d'"${CFG_TAB}2${CFG_NL}" ]
 }
 
 @test "config: a value keeps its spaces and its # (no trailing comments)" {
@@ -898,4 +902,32 @@ assert_no_errors() {
 	cfg_load "$CTX/graft.conf" || rc=$?
 	[ "$rc" != 0 ]
 	assert_error "contains a tab"
+}
+
+@test "config: a tab inside a value does not tear its own error message apart" {
+	# CFG_ERRORS is tab separated. gr_clean stripped control characters but let
+	# tab through, so a value containing one split the message across two lines
+	# and stranded the hint behind a literal tab.
+	printf '[defaults]\nbackup = a\tb\n' >"$CTX/graft.conf"
+	rc=0
+	cfg_load "$CTX/graft.conf" || rc=$?
+	[ "$rc" != 0 ]
+
+	local report
+	report=$(cfg_print_errors 2>&1)
+	# the value is shown as it really is, escaped, on one line
+	case "$report" in
+	*"invalid value 'a\\tb'"*) ;;
+	*)
+		printf 'expected an escaped tab in the message, got:\n%s\n' "$report" >&2
+		return 1
+		;;
+	esac
+	# and no raw tab survived into the rendered report
+	case "$report" in
+	*"$(printf '\t')"*)
+		printf 'a raw tab survived into the report:\n%s\n' "$report" >&2
+		return 1
+		;;
+	esac
 }

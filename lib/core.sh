@@ -47,8 +47,17 @@ gr_init_style() {
 # Any string that came from a config file or a filesystem path is printed
 # through this. A path is allowed to contain terminal escape sequences; a tool
 # that echoes them back lets a repo you cloned repaint your terminal.
+#
+# A tab is not dropped but shown as \t, for two reasons. It is legal in a path
+# and in a config value, so silently deleting it would misreport what is
+# actually on disk. And several of graft's own records are tab-separated, so a
+# tab that survives this function tears the record it is embedded in - a config
+# value containing one used to split its own error message across two lines and
+# strand the hint after it.
 gr_clean() {
-	printf '%s' "$1" | tr -d '\000-\010\013\014\016-\037\177'
+	local s
+	s=$(printf '%s' "$1" | tr -d '\000-\010\013\014\016-\037\177')
+	printf '%s' "${s//$'\t'/\\t}"
 }
 
 gr_say() { [ "$GRAFT_QUIET" = 1 ] || printf '%s\n' "$*"; }

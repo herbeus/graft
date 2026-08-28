@@ -8,12 +8,15 @@
 # derived strings are grep(1) as a regex *validator* and sed(1) on the file
 # itself when an error is rendered.
 #
-# bash 3.2: no associative arrays, so parsed data lives in newline separated
-# TSV inside plain string variables and is queried by splitting on tabs
-# (SPEC section 9).
+# bash 3.2: no associative arrays. Parsed data therefore lives in parallel
+# *indexed* arrays plus a section table that records, for every section, which
+# records belong to it. That index is what keeps the module linear: "every
+# `link` of [target x]" is a walk over ten entries, not over the whole file.
+# The earlier design kept one TSV string and re-scanned it for every question,
+# which made `graft check` quadratic - 200 targets took 83s.
 #
-# Section ids used in CFG_DATA and accepted by cfg_get/cfg_get_all - this is
-# the one encoding, there is no second spelling:
+# Section ids used in the section table and accepted by cfg_get/cfg_get_all -
+# this is the one encoding, there is no second spelling:
 #   defaults          for [defaults]
 #   target:<name>     for [target "<name>"]
 #   setup:<name>      for [setup "<name>"]
@@ -34,6 +37,16 @@ CFG_KEYS_SETUP='description run'
 CFG_KEYS_REPEATABLE='link find verify search_root'
 CFG_STRATEGIES='path env origin origin-re dir parent-of target'
 
+# The built-in defaults of SPEC 4.1/4.2, as one data row per key instead of a
+# case arm per key. search_root is absent on purpose: its default is $HOME,
+# which is not a constant.
+CFG_DEFAULTS='source_root=. search_depth=4 search_prune=node_modules,vendor,target,.cache,Library,dist,build backup=timestamp backup_suffix=.graft-backup git_exclude=yes on_foreign_link=warn require=no confirm=no'
+
+# Keys whose value must be one of a fixed set (SPEC 4.1). Same table shape, so
+# the validator, the "allowed:" list in the message and the typo suggestion all
+# read off this one line and can never drift apart.
+CFG_ENUMS='backup=suffix,timestamp,abort git_exclude=yes,no require=yes,no confirm=yes,no on_foreign_link=warn,abort'
+
 # SPEC 4.3: graft never links over these, wherever they sit in a checkout.
 CFG_DENY='.ssh .gnupg .aws .config/gh .netrc .bashrc .zshrc .profile .bash_profile .gitconfig'
 
@@ -45,17 +58,56 @@ CFG_ERROR_CAP=250
 CFG_FILE=''         # absolute path of graft.conf
 CFG_CTX_ROOT=''     # absolute path of the context repo
 CFG_SOURCE_ROOT=''  # absolute path of the source root
-CFG_DATA=''         # section \t key \t value \t lineno
+CFG_DATA=''         # section \t key \t value \t lineno   (SPEC 9.1, rendered)
 CFG_ERRORS=''       # lineno \t message \t hint
-CFG_SECTIONS=''     # section \t lineno, headers in file order
 CFG_PARSE_ERRORS='' # the lexical subset of CFG_ERRORS, so cfg_validate can rerun
-CFG__LIST=''        # scratch used by the link list builder
-CFG__SECTION_ID=''  # out parameter of cfg__parse_header
-CFG__CUR_TARGET=''  # target whose find strategy is being validated
 
-# Section id for keys below a header that did not parse. It cannot collide with
-# a real id: a section type never contains a space.
-CFG_BAD_SECTION='? broken'
+# Records: one entry per "key = value" line, in file order. Values are kept
+# *unescaped* here; CFG_DATA is a rendering for humans and for SPEC 9.1 and is
+# never read back, which is why this module needs no TSV decoder at all.
+CFG_NREC=0
+CFG_RSEC=() # index into the section table
+CFG_RKEY=()
+CFG_RVAL=()
+CFG_RLN=()
+
+# Sections, in file order, each with the list of record indices that belong to
+# it. A list rather than a first/last range because a second [defaults] merges
+# into the first (an INI reader is expected to do that), so a section's records
+# are not necessarily contiguous. Indices are digits, so the unquoted `for r in
+# ${CFG_SREC[si]}` below splits on space and can match no glob.
+CFG_NSEC=0
+CFG_SID=()
+CFG_SLN=()
+CFG_SREC=()
+CFG_SDEF=-1 # index of [defaults], or -1 - the most asked for section by far
+
+# The name to index map, and bash 3.2's missing associative array: every
+# section id falls into one of CFG_HASH_N buckets, and a bucket holds the space
+# separated indices of the sections in it. Looking a section up therefore walks
+# a handful of entries rather than all of them (see the module header).
+#
+# The bucket comes from the length and the last two characters, because that is
+# where section ids actually differ (api, web, proj001, proj002, ...). A bad
+# guess only makes one bucket longer; it can never give a wrong answer, because
+# the walk still compares the whole id.
+CFG_HASH_N=251
+CFG_SBUCK=()
+
+# Scratch / out parameters. Assigning instead of printing keeps the hot paths
+# and the whole error path free of subshells.
+CFG__TRIM='' CFG__SUGGEST='' CFG__TVAL=''
+CFG__KEYS='' CFG__LABEL=''
+CFG__DEST='' CFG__KIND='' CFG__VAL='' CFG__BUCKET=0
+CFG__SPEC='' CFG__SRC='' CFG__RAW=''
+CFG__SI=-1 CFG__KI=-1 # section / record index found by the two seekers
+CFG__SEEN=''          # per section "dest seen on line" list, see below
+CFG__CUR_TARGET=''    # target whose find strategy is being validated
+
+# Effective link list of cfg_target_links, built in place (see cfg__drop_dest).
+CFG__LN=0
+CFG__LSRC=()
+CFG__LDEST=()
 
 # printenv reads the *environment*. An indirect expansion (${!name}) would
 # happily hand a config file the parser's own local variables instead.
@@ -73,131 +125,63 @@ cfg__in_list() {
 	return 1
 }
 
-# Trimming happens once per line and per field, so the fork free variant that
-# assigns CFG__TRIM is the one the parser uses.
+# Trimming happens once per line and per field, so it assigns rather than
+# prints: a command substitution here is a fork per config line.
 cfg__trim_to() {
 	local s="$1"
 	s=${s#"${s%%[![:space:]]*}"}
 	CFG__TRIM=${s%"${s##*[![:space:]]}"}
 }
 
-cfg__trim() {
-	cfg__trim_to "$1"
-	printf '%s' "$CFG__TRIM"
-}
-
-# Tab is the field separator of CFG_DATA, so it has to survive as an escape.
-# Newlines cannot occur: the parser is line based.
-cfg__esc() {
-	local s="$1"
-	s=${s//\\/\\\\}
-	s=${s//"$CFG_TAB"/\\t}
-	printf '%s' "$s"
-}
-
-# Left to right, so that a literal "\\t" decodes to backslash + t and not to a
-# tab. Reversing the two substitutions instead would be subtly wrong.
-cfg__unesc() {
-	local s="$1" out='' head rest
-	while [ -n "$s" ]; do
-		case "$s" in
-		*\\*) ;;
-		*)
-			out="$out$s"
-			break
-			;;
-		esac
-		head=${s%%\\*}
-		rest=${s#*\\}
-		out="$out$head"
-		case "$rest" in
-		t*)
-			out="$out$CFG_TAB"
-			s=${rest#?}
-			;;
-		\\*)
-			out="$out\\"
-			s=${rest#?}
-			;;
-		*)
-			out="$out\\"
-			s=$rest
-			;;
-		esac
-	done
-	printf '%s' "$out"
-}
-
-# Split a four field CFG_DATA record into CFG__F1..CFG__F4. Neither `read` nor
-# cut(1) can do this: tab counts as IFS whitespace, so `IFS=$'\t' read`
-# silently collapses an empty value and shifts every field behind it, and a
-# command substitution per field costs a fork per field per record.
-cfg__unpack() {
-	local rec="$1"
-	CFG__F1=${rec%%"$CFG_TAB"*}
-	rec=${rec#*"$CFG_TAB"}
-	CFG__F2=${rec%%"$CFG_TAB"*}
-	rec=${rec#*"$CFG_TAB"}
-	CFG__F3=${rec%%"$CFG_TAB"*}
-	CFG__F4=${rec#*"$CFG_TAB"}
-	case "$CFG__F3" in
-	*\\*) CFG__F3=$(cfg__unesc "$CFG__F3") ;;
-	esac
-}
-
-# Field n (1..4) of a tab separated record, for the short records that are not
-# on a hot path.
-cfg__field() {
-	local rec="$1" n="$2"
-	while [ "$n" -gt 1 ]; do
-		case "$rec" in
-		*"$CFG_TAB"*) rec=${rec#*"$CFG_TAB"} ;;
-		*)
-			printf ''
+# Value for <key> in a "key=value key=value ..." table, in CFG__TVAL.
+cfg__table_get() {
+	local key="$1" entry
+	CFG__TVAL=''
+	# shellcheck disable=SC2086 # the table is a fixed word list, split on space
+	for entry in $2; do
+		case "$entry" in
+		"$key"=*)
+			CFG__TVAL=${entry#*=}
 			return 0
 			;;
 		esac
-		n=$((n - 1))
 	done
-	printf '%s' "${rec%%"$CFG_TAB"*}"
+	return 1
 }
 
 # --- typo heuristic ----------------------------------------------------------
 
-# True when one edit (insert, delete, substitute) or one transposition of two
-# adjacent characters turns $1 into $2. That is all a keyword typo ever is, and
-# it keeps the whole thing to a single pass instead of a distance matrix.
+# True when one edit - insert, delete, substitute, or a swap of two adjacent
+# characters - turns $1 into $2. That is all a keyword typo ever is.
+#
+# Strip the common prefix and the common suffix; what is left is the edit
+# itself, and a single edit leaves at most one character on each side (two, and
+# mirrored, for a swap). One pass, no distance matrix.
 cfg__near() {
-	local a="$1" b="$2" la lb i
+	local a="$1" b="$2" la=${#1} lb=${#2} i=0 j=0 ra rb
 	[ "$a" = "$b" ] && return 0
-	la=${#a}
-	lb=${#b}
 	case $((la - lb)) in
 	0 | 1 | -1) ;;
 	*) return 1 ;;
 	esac
-	i=0
 	while [ "$i" -lt "$la" ] && [ "$i" -lt "$lb" ] && [ "${a:i:1}" = "${b:i:1}" ]; do
 		i=$((i + 1))
 	done
-	if [ "$la" -eq "$lb" ]; then
-		[ "${a:i+1}" = "${b:i+1}" ] && return 0
-		if [ "${a:i:1}" = "${b:i+1:1}" ] && [ "${a:i+1:1}" = "${b:i:1}" ]; then
-			[ "${a:i+2}" = "${b:i+2}" ] && return 0
-		fi
-		return 1
-	fi
-	if [ "$la" -gt "$lb" ]; then
-		[ "${a:i+1}" = "${b:i}" ] && return 0
-	else
-		[ "${a:i}" = "${b:i+1}" ] && return 0
-	fi
+	while [ $((i + j)) -lt "$la" ] && [ $((i + j)) -lt "$lb" ] \
+		&& [ "${a:la-j-1:1}" = "${b:lb-j-1:1}" ]; do
+		j=$((j + 1))
+	done
+	ra=${a:i:la-i-j}
+	rb=${b:i:lb-i-j}
+	case "${#ra},${#rb}" in
+	0,1 | 1,0 | 1,1) return 0 ;;
+	2,2) [ "$ra" = "${rb:1:1}${rb:0:1}" ] && return 0 ;;
+	esac
 	return 1
 }
 
 # cfg__suggest_to <word> <candidates...> -> CFG__SUGGEST, either the empty
-# string or " Did you mean 'x'?". Assigning instead of printing keeps the whole
-# error path free of subshells, which matters on a config full of typos.
+# string or " Did you mean 'x'?".
 cfg__suggest_to() {
 	local word="$1" cand
 	shift
@@ -214,15 +198,6 @@ cfg__suggest_to() {
 cfg__suggest() {
 	cfg__suggest_to "$@"
 	printf '%s' "$CFG__SUGGEST"
-}
-
-# Control characters in a message would let a cloned repo repaint the terminal.
-# gr_clean forks, so it is only called when there is something to strip.
-cfg__clean_to() {
-	case "$1" in
-	*[[:cntrl:]]*) CFG__CLEAN=$(gr_clean "$1") ;;
-	*) CFG__CLEAN="$1" ;;
-	esac
 }
 
 # --- expansion ---------------------------------------------------------------
@@ -324,17 +299,9 @@ cfg__error() {
 	CFG_ERRORS="$CFG_ERRORS$1$CFG_TAB$2$CFG_TAB$3$CFG_NL"
 }
 
-cfg__error_count() {
-	local rec n=0
-	while IFS= read -r rec; do
-		[ -n "$rec" ] || continue
-		n=$((n + 1))
-	done <<<"$CFG_ERRORS"
-	printf '%s' "$n"
-}
-
 # Checks run in phases, so the messages have to be put back into file order
-# before a human sees them.
+# before a human sees them. -s keeps two problems on one line in the order they
+# were found.
 cfg__sort_errors() {
 	local sorted
 	[ -n "$CFG_ERRORS" ] || return 0
@@ -342,52 +309,119 @@ cfg__sort_errors() {
 	CFG_ERRORS="$sorted$CFG_NL"
 }
 
+# --- the record and section tables -------------------------------------------
+
+cfg__add_section() {
+	CFG_SID[CFG_NSEC]=$1
+	CFG_SLN[CFG_NSEC]=$2
+	CFG_SREC[CFG_NSEC]=''
+	cfg__bucket_to "$1"
+	CFG_SBUCK[CFG__BUCKET]="${CFG_SBUCK[CFG__BUCKET]:-} $CFG_NSEC"
+	CFG__SI=$CFG_NSEC
+	[ "$1" = defaults ] && CFG_SDEF=$CFG_NSEC
+	CFG_NSEC=$((CFG_NSEC + 1))
+	return 0
+}
+
+cfg__add_record() {
+	local si="$1"
+	CFG_RSEC[CFG_NREC]=$si
+	CFG_RKEY[CFG_NREC]=$2
+	CFG_RVAL[CFG_NREC]=$3
+	CFG_RLN[CFG_NREC]=$4
+	CFG_SREC[si]="${CFG_SREC[si]} $CFG_NREC"
+	CFG_NREC=$((CFG_NREC + 1))
+}
+
+# CFG_DATA, the escaped TSV rendering SPEC 9.1 promises, built in one pass at
+# the end of the parse. Deliberately not appended to per record: `s="$s..."`
+# copies the whole accumulated string every time, which is quadratic in the
+# number of records - and nothing in the tool reads the value back.
+cfg__render_data() {
+	local i=0 v
+	# Neither a `case` nor a nested command substitution in here: bash 3.2
+	# miscounts parentheses inside $( ), and this is the one place in the
+	# module that would trip over it (invariant I9).
+	CFG_DATA=$(
+		while [ "$i" -lt "$CFG_NREC" ]; do
+			v=${CFG_RVAL[i]}
+			v=${v//\\/\\\\}
+			v=${v//"$CFG_TAB"/\\t}
+			printf '%s\t%s\t%s\t%s\n' \
+				"${CFG_SID[CFG_RSEC[i]]}" "${CFG_RKEY[i]}" "$v" "${CFG_RLN[i]}"
+			i=$((i + 1))
+		done
+	)
+	# A command substitution eats trailing newlines; every record ends with one.
+	[ -n "$CFG_DATA" ] && CFG_DATA="$CFG_DATA$CFG_NL"
+	return 0
+}
+
+cfg__bucket_to() {
+	local s="$1" n=${#1} a=0 b=0
+	if [ "$n" -gt 0 ]; then printf -v a '%d' "'${s:n-1:1}"; fi
+	if [ "$n" -gt 1 ]; then printf -v b '%d' "'${s:n-2:1}"; fi
+	CFG__BUCKET=$(((a * 131 + b * 7 + n) % CFG_HASH_N))
+}
+
+# Index of section <id> in CFG__SI, or -1 and status 1.
+cfg__sec_index() {
+	local i
+	cfg__bucket_to "$1"
+	# shellcheck disable=SC2086 # a list of decimal indices, split on space
+	for i in ${CFG_SBUCK[CFG__BUCKET]:-}; do
+		if [ "${CFG_SID[i]}" = "$1" ]; then
+			CFG__SI=$i
+			return 0
+		fi
+	done
+	CFG__SI=-1
+	return 1
+}
+
+# First / last record index for <key> inside section <si>, in CFG__KI, or -1
+# and status 1. Both walk that one section's records, never the whole file.
+cfg__first_in() {
+	local key="$2" i
+	# shellcheck disable=SC2086 # a list of decimal indices, split on space
+	for i in ${CFG_SREC[$1]}; do
+		if [ "${CFG_RKEY[i]}" = "$key" ]; then
+			CFG__KI=$i
+			return 0
+		fi
+	done
+	CFG__KI=-1
+	return 1
+}
+
+cfg__last_in() {
+	local key="$2" i
+	CFG__KI=-1
+	# shellcheck disable=SC2086 # a list of decimal indices, split on space
+	for i in ${CFG_SREC[$1]}; do
+		[ "${CFG_RKEY[i]}" = "$key" ] && CFG__KI=$i
+	done
+	[ "$CFG__KI" -ge 0 ]
+}
+
 # --- data access -------------------------------------------------------------
 
 # <section> is a section id as encoded above: `defaults`, `target:<name>` or
 # `setup:<name>`. Anything else simply matches no record.
 cfg_get_all() {
-	local section="$1" key="$2" rec out=''
-	while IFS= read -r rec; do
-		[ -n "$rec" ] || continue
-		cfg__unpack "$rec"
-		[ "$CFG__F1" = "$section" ] || continue
-		[ "$CFG__F2" = "$key" ] || continue
-		out="$out$CFG__F3$CFG_NL"
-	done <<<"$CFG_DATA"
-	printf '%s' "$out"
-}
-
-cfg__has() {
-	local section="$1" key="$2" rec
-	while IFS= read -r rec; do
-		case "$rec" in
-		"$section$CFG_TAB$key$CFG_TAB"*) return 0 ;;
-		esac
-	done <<<"$CFG_DATA"
-	return 1
-}
-
-# Line number of the first occurrence of section+key, or nothing.
-cfg__first_lineno() {
-	local section="$1" key="$2" rec
-	while IFS= read -r rec; do
-		case "$rec" in
-		"$section$CFG_TAB$key$CFG_TAB"*)
-			printf '%s' "${rec##*"$CFG_TAB"}"
-			return 0
-			;;
-		esac
-	done <<<"$CFG_DATA"
-	return 1
+	local key="$2" i
+	cfg__sec_index "$1" || return 0
+	# shellcheck disable=SC2086 # a list of decimal indices, split on space
+	for i in ${CFG_SREC[CFG__SI]}; do
+		[ "${CFG_RKEY[i]}" = "$key" ] && printf '%s\n' "${CFG_RVAL[i]}"
+	done
+	return 0
 }
 
 # Last value wins, which is what an INI reader is expected to do.
 cfg_get() {
-	local section="$1" key="$2" all
-	if cfg__has "$section" "$key"; then
-		all=$(cfg_get_all "$section" "$key")
-		printf '%s\n' "$all" | tail -n 1
+	if cfg__sec_index "$1" && cfg__last_in "$CFG__SI" "$2"; then
+		printf '%s\n' "${CFG_RVAL[CFG__KI]}"
 		return 0
 	fi
 	if [ $# -ge 3 ]; then printf '%s\n' "$3"; fi
@@ -397,60 +431,63 @@ cfg_get() {
 # The built-in defaults of SPEC 4.1, so that callers do not have to carry them.
 cfg_default() {
 	case "$1" in
-	source_root) printf '.\n' ;;
 	search_root) printf '%s\n' "$HOME" ;;
-	search_depth) printf '4\n' ;;
-	search_prune) printf 'node_modules,vendor,target,.cache,Library,dist,build\n' ;;
-	backup) printf 'timestamp\n' ;;
-	backup_suffix) printf '.graft-backup\n' ;;
-	git_exclude) printf 'yes\n' ;;
-	on_foreign_link) printf 'warn\n' ;;
-	require) printf 'no\n' ;;
-	confirm) printf 'no\n' ;;
-	*) printf '' ;;
+	*) cfg__table_get "$1" "$CFG_DEFAULTS" && printf '%s\n' "$CFG__TVAL" ;;
 	esac
+	return 0
+}
+
+# Value of <key> for section <si>, falling back to [defaults], in CFG__VAL.
+# Status 1 means neither section had the key and CFG__VAL holds the fallback.
+# This is cfg_target_get without the name lookup and without the fork, for the
+# loops below that already know which section they are in.
+cfg__inherited() {
+	local si="$1" key="$2"
+	if [ "$si" -ge 0 ] && cfg__last_in "$si" "$key"; then
+		CFG__VAL=${CFG_RVAL[CFG__KI]}
+		return 0
+	fi
+	if [ "$CFG_SDEF" -ge 0 ] && cfg__last_in "$CFG_SDEF" "$key"; then
+		CFG__VAL=${CFG_RVAL[CFG__KI]}
+		return 0
+	fi
+	CFG__VAL="$3"
+	return 1
 }
 
 cfg_target_get() {
-	local t="$1" key="$2"
-	if cfg__has "target:$t" "$key"; then
-		cfg_get "target:$t" "$key"
+	local si=-1
+	cfg__sec_index "target:$1" && si=$CFG__SI
+	if cfg__inherited "$si" "$2" "${3:-}" || [ $# -ge 3 ]; then
+		printf '%s\n' "$CFG__VAL"
 		return 0
 	fi
-	if cfg__has defaults "$key"; then
-		cfg_get defaults "$key"
-		return 0
-	fi
-	if [ $# -ge 3 ]; then
-		printf '%s\n' "$3"
-	else
-		cfg_default "$key"
-	fi
+	cfg_default "$2"
 }
 
 cfg_targets() {
-	local rec name
-	while IFS= read -r rec; do
-		[ -n "$rec" ] || continue
-		name=$(cfg__field "$rec" 1)
-		case "$name" in
-		target:*) printf '%s\n' "${name#target:}" ;;
+	local i=0
+	while [ "$i" -lt "$CFG_NSEC" ]; do
+		case "${CFG_SID[i]}" in
+		target:*) printf '%s\n' "${CFG_SID[i]#target:}" ;;
 		esac
-	done <<<"$CFG_SECTIONS"
+		i=$((i + 1))
+	done
 }
 
 cfg_setups() {
-	local rec name
-	while IFS= read -r rec; do
-		[ -n "$rec" ] || continue
-		name=$(cfg__field "$rec" 1)
-		case "$name" in
+	local i=0 desc run
+	while [ "$i" -lt "$CFG_NSEC" ]; do
+		case "${CFG_SID[i]}" in
 		setup:*)
-			printf '%s\t%s\t%s\n' "${name#setup:}" \
-				"$(cfg_get "$name" description '')" "$(cfg_get "$name" run '')"
+			desc='' run=''
+			cfg__last_in "$i" description && desc=${CFG_RVAL[CFG__KI]}
+			cfg__last_in "$i" run && run=${CFG_RVAL[CFG__KI]}
+			printf '%s\t%s\t%s\n' "${CFG_SID[i]#setup:}" "$desc" "$run"
 			;;
 		esac
-	done <<<"$CFG_SECTIONS"
+		i=$((i + 1))
+	done
 }
 
 cfg_target_finds() {
@@ -467,15 +504,9 @@ cfg_target_verifies() {
 # True when <name> is a declared [target "<name>"]. Deliberately not
 # `cfg_targets | grep -q`: grep -q closes the pipe on the first match, which
 # under `set -o pipefail` turns a *hit* into a non-zero pipeline (SIGPIPE) for
-# every target that is not the last one listed.
+# every target that is not the last one listed (pitfall P8).
 cfg__is_target() {
-	local want="$1" rec
-	while IFS= read -r rec; do
-		case "$rec" in
-		"target:$want$CFG_TAB"*) return 0 ;;
-		esac
-	done <<<"$CFG_SECTIONS"
-	return 1
+	cfg__sec_index "target:$1"
 }
 
 # --- path rules --------------------------------------------------------------
@@ -489,90 +520,64 @@ cfg__is_target() {
 # that only stops people who were not trying. "..", by contrast, is deliberately
 # left alone here: it is rejected outright a step later, and collapsing it first
 # would hide the very thing that check is looking for.
-cfg__norm_dest() {
+#
+# The arms are tried in this order until nothing matches any more. Slashes go
+# first: the other order turns ".//x" into "/x", which then reads as an
+# absolute path - still refused, but with a message that sends the reader
+# looking for a leading slash they never wrote.
+cfg__norm_dest_to() {
 	local d="$1"
-	# Slashes are collapsed first. The other order turns ".//x" into "/x",
-	# which then reads as an absolute path - still refused, but with a message
-	# that sends the reader looking for a leading slash they never wrote.
 	while :; do
 		case "$d" in
 		*//*) d=${d//\/\///} ;;
 		*/./*) d=${d//\/.\///} ;;
-		*) break ;;
-		esac
-	done
-	while :; do
-		case "$d" in
 		'./'*) d=${d#./} ;;
-		*) break ;;
-		esac
-	done
-	while :; do
-		case "$d" in
 		*/.) d=${d%/.} ;;
 		*/) d=${d%/} ;;
 		*) break ;;
 		esac
 	done
-	printf '%s' "$d"
+	CFG__DEST=$d
 }
 
-# One word describing why a link destination is unusable, or "ok".
-# SPEC 4.3, and this is the check invariant I4 leans on.
-cfg__dest_kind() {
+# One word describing why a link destination is unusable, or "ok", in
+# CFG__KIND. SPEC 4.3, and this is the check invariant I4 leans on.
+# The order of the questions is load bearing: ".git/../x" must be reported as
+# a "..", not as a write into the git directory.
+cfg__dest_kind_to() {
 	local d entry
-	d=$(cfg__norm_dest "$1")
+	cfg__norm_dest_to "$1"
+	d=$CFG__DEST
+	CFG__KIND=ok
 	# A tab in a destination silently shifts the fields of the internal plan
 	# record, which made --dry-run plan one path and link do nothing at all.
 	# Control characters have no business in a path we are about to create.
-	case "$d" in
-	*"$CFG_TAB"*)
-		printf 'control'
-		return 0
-		;;
-	esac
 	# shellcheck disable=SC2088 # a literal tilde is what we are looking for
 	case "$d" in
-	'')
-		printf 'empty'
-		return 0
-		;;
-	/*)
-		printf 'absolute'
-		return 0
-		;;
-	'~' | '~/'*)
-		printf 'tilde'
-		return 0
-		;;
+	*"$CFG_TAB"*) CFG__KIND=control ;;
+	'') CFG__KIND=empty ;;
+	/*) CFG__KIND=absolute ;;
+	'~' | '~/'*) CFG__KIND=tilde ;;
 	esac
+	[ "$CFG__KIND" = ok ] || return 0
 	if gr_has_dotdot "$d"; then
-		printf 'dotdot'
-		return 0
-	fi
-	if [ "$d" = '.' ]; then
-		printf 'self'
+		CFG__KIND=dotdot
 		return 0
 	fi
 	case "$d" in
-	'.git' | '.git/'*)
-		printf 'git'
-		return 0
-		;;
+	'.') CFG__KIND=self ;;
+	'.git' | '.git/'*) CFG__KIND=git ;;
 	esac
+	[ "$CFG__KIND" = ok ] || return 0
 	for entry in $CFG_DENY; do
-		if [ "$d" = "$entry" ]; then
-			printf 'deny:%s' "$entry"
-			return 0
-		fi
 		case "$d" in
-		"$entry"/*)
-			printf 'deny:%s' "$entry"
+		"$entry" | "$entry"/*)
+			CFG__KIND="deny:$entry"
 			return 0
 			;;
 		esac
 	done
-	printf 'ok'
+	return 0
 }
 
 # Absolute source path of one link spec of one target.
@@ -603,32 +608,11 @@ cfg__has_meta() {
 
 # --- parser ------------------------------------------------------------------
 
-cfg__add_data() {
-	local v="$3"
-	case "$v" in
-	*\\* | *"$CFG_TAB"*) v=$(cfg__esc "$v") ;;
-	esac
-	CFG_DATA="$CFG_DATA$1$CFG_TAB$2$CFG_TAB$v$CFG_TAB$4$CFG_NL"
-}
-
-cfg__section_lineno() {
-	local id="$1" rec
-	while IFS= read -r rec; do
-		[ -n "$rec" ] || continue
-		if [ "$(cfg__field "$rec" 1)" = "$id" ]; then
-			cfg__field "$rec" 2
-			return 0
-		fi
-	done <<<"$CFG_SECTIONS"
-	return 1
-}
-
-# Sets CFG__SECTION_ID to the parsed section id, or to the empty string when
-# the header is broken. It cannot print the id instead: a command substitution
-# would run it in a subshell and every error it recorded would be lost.
+# Adds the section and sets CFG__SI, or reports the problem and returns 1.
+# It cannot print the id instead: a command substitution would run it in a
+# subshell and every error it recorded would be lost.
 cfg__parse_header() {
-	local line="$1" lineno="$2" inner type rest name first id
-	CFG__SECTION_ID=''
+	local line="$1" lineno="$2" inner type rest name first
 	case "$line" in
 	*']') ;;
 	*)
@@ -638,10 +622,11 @@ cfg__parse_header() {
 		;;
 	esac
 	inner=${line#\[}
-	inner=${inner%\]}
-	inner=$(cfg__trim "$inner")
+	cfg__trim_to "${inner%\]}"
+	inner="$CFG__TRIM"
 	type=${inner%%[[:space:]]*}
-	rest=$(cfg__trim "${inner#"$type"}")
+	cfg__trim_to "${inner#"$type"}"
+	rest="$CFG__TRIM"
 	if ! cfg__in_list "$type" "$CFG_SECTION_TYPES"; then
 		cfg__error "$lineno" "unknown section type '$(gr_clean "$type")'" \
 			"known sections: defaults, target, setup.$(cfg__suggest "$type" defaults target setup)"
@@ -653,7 +638,9 @@ cfg__parse_header() {
 				"write [defaults] and move per project keys into [target \"name\"]"
 			return 1
 		fi
-		CFG__SECTION_ID='defaults'
+		# A second [defaults] merges into the first, the way an INI reader is
+		# expected to behave. Only *named* sections have to be unique (4.2).
+		cfg__sec_index defaults || cfg__add_section defaults "$lineno"
 		return 0
 	fi
 	if [ -z "$rest" ]; then
@@ -679,7 +666,8 @@ cfg__parse_header() {
 		return 1
 		;;
 	esac
-	if [ -z "$(cfg__trim "$name")" ]; then
+	cfg__trim_to "$name"
+	if [ -z "$CFG__TRIM" ]; then
 		cfg__error "$lineno" "section name is blank" "write [$type \"name\"]"
 		return 1
 	fi
@@ -699,19 +687,18 @@ cfg__parse_header() {
 		return 1
 		;;
 	esac
-	id="$type:$name"
-	if first=$(cfg__section_lineno "$id"); then
+	if cfg__sec_index "$type:$name"; then
 		cfg__error "$lineno" \
-			"duplicate $type name '$(gr_clean "$name")' (first defined on line $first)" \
+			"duplicate $type name '$(gr_clean "$name")' (first defined on line ${CFG_SLN[CFG__SI]})" \
 			'rename one of the two sections, or merge their keys'
 		return 1
 	fi
-	CFG__SECTION_ID="$id"
+	cfg__add_section "$type:$name" "$lineno"
 }
 
+# <sec> is a section index, or -1 for "no section yet".
 cfg__parse_key() {
-	local line="$1" lineno="$2" section="$3" key value first
-	[ "$section" = "$CFG_BAD_SECTION" ] && return 0
+	local line="$1" lineno="$2" sec="$3" key value first
 	case "$line" in
 	*=*) ;;
 	*)
@@ -740,7 +727,7 @@ cfg__parse_key() {
 		return 1
 		;;
 	esac
-	if [ -z "$section" ]; then
+	if [ "$sec" -lt 0 ]; then
 		cfg__error "$lineno" "key '$(gr_clean "$key")' sits outside any section" \
 			'put it under [defaults], [target "name"] or [setup "name"]'
 		return 1
@@ -752,11 +739,11 @@ cfg__parse_key() {
 	case "$value" in
 	*'~'* | *'${'*) value=$(cfg__expand_value "$key" "$value") ;;
 	esac
-	cfg__add_data "$section" "$key" "$value" "$lineno"
+	cfg__add_record "$sec" "$key" "$value" "$lineno"
 }
 
 cfg__parse() {
-	local file="$1" line lineno=0 section='' id
+	local file="$1" line lineno=0 sec=-1
 	while IFS= read -r line || [ -n "$line" ]; do
 		lineno=$((lineno + 1))
 		line=${line%$'\r'} # CRLF is tolerated, SPEC 4
@@ -765,18 +752,18 @@ cfg__parse() {
 		case "$line" in
 		'' | '#'* | ';'*) continue ;;
 		'['*)
-			cfg__parse_header "$line" "$lineno" || :
-			id="$CFG__SECTION_ID"
-			if [ -n "$id" ]; then
-				section="$id"
-				CFG_SECTIONS="$CFG_SECTIONS$id$CFG_TAB$lineno$CFG_NL"
+			if cfg__parse_header "$line" "$lineno"; then
+				sec=$CFG__SI
 			else
 				# The header was already reported. Swallow its keys instead of
 				# blaming every one of them on the section above it.
-				section="$CFG_BAD_SECTION"
+				sec=-2
 			fi
 			;;
-		*) cfg__parse_key "$line" "$lineno" "$section" || : ;;
+		*)
+			[ "$sec" = -2 ] && continue
+			cfg__parse_key "$line" "$lineno" "$sec" || :
+			;;
 		esac
 	done <"$file"
 }
@@ -806,20 +793,42 @@ cfg__section_label() {
 	printf '%s' "$CFG__LABEL"
 }
 
+# <allowed> is the comma separated value list from CFG_ENUMS.
 cfg__check_enum() {
-	local lineno="$1" key="$2" value="$3"
-	shift 3
-	if cfg__in_list "$value" "$*"; then return 0; fi
-	local list
-	list=$(printf '%s, ' "$@")
-	list=${list%, }
+	local lineno="$1" key="$2" value="$3" allowed="${4//,/ }"
+	cfg__in_list "$value" "$allowed" && return 0
+	# shellcheck disable=SC2086 # the allowed list is a plain word list
+	cfg__suggest_to "$value" $allowed
 	cfg__error "$lineno" "invalid value '$(gr_clean "$value")' for '$key'" \
-		"allowed: $list.$(cfg__suggest "$value" "$@")"
+		"allowed: ${allowed// /, }.$CFG__SUGGEST"
 	return 1
 }
 
+# The "relative to <base>, and no way out of it" rule that `verify` and `run`
+# share (SPEC 4.2, 4.5). Returns 1 once it has reported something, so that the
+# caller can stop looking at the value.
+cfg__check_relpath() {
+	local lineno="$1" what="$2" value="$3" base="$4" hint="$5"
+	case "$value" in
+	/* | '~'*)
+		cfg__error "$lineno" "$what '$(gr_clean "$value")' must be relative to $base" "$hint"
+		return 1
+		;;
+	esac
+	if gr_has_dotdot "$value"; then
+		cfg__error "$lineno" "$what '$(gr_clean "$value")' must not contain a '..' segment" \
+			'write the path without ".."'
+		return 1
+	fi
+	return 0
+}
+
 cfg__check_value() {
-	local section="$1" key="$2" value="$3" lineno="$4" abs part rest
+	local key="$2" value="$3" lineno="$4" abs part rest
+	if cfg__table_get "$key" "$CFG_ENUMS"; then
+		cfg__check_enum "$lineno" "$key" "$value" "$CFG__TVAL" || :
+		return 0
+	fi
 	case "$key" in
 	source_root)
 		abs=$(cfg__resolve_rel "$CFG_CTX_ROOT" "$value")
@@ -858,9 +867,6 @@ cfg__check_value() {
 			esac
 		done
 		;;
-	backup) cfg__check_enum "$lineno" backup "$value" suffix timestamp abort || : ;;
-	git_exclude | require | confirm) cfg__check_enum "$lineno" "$key" "$value" yes no || : ;;
-	on_foreign_link) cfg__check_enum "$lineno" on_foreign_link "$value" warn abort || : ;;
 	backup_suffix)
 		case "$value" in
 		*/*) cfg__error "$lineno" "backup_suffix '$(gr_clean "$value")' must not contain a slash" \
@@ -875,31 +881,12 @@ cfg__check_value() {
 		fi
 		;;
 	verify)
-		case "$value" in
-		/* | '~'*)
-			cfg__error "$lineno" "verify path '$(gr_clean "$value")' must be relative to the checkout" \
-				'write a path like .git or package.json'
-			return 0
-			;;
-		esac
-		if gr_has_dotdot "$value"; then
-			cfg__error "$lineno" "verify path '$(gr_clean "$value")' must not contain a '..' segment" \
-				'write the path without ".."'
-		fi
+		cfg__check_relpath "$lineno" 'verify path' "$value" 'the checkout' \
+			'write a path like .git or package.json' || :
 		;;
 	run)
-		case "$value" in
-		/* | '~'*)
-			cfg__error "$lineno" "run path '$(gr_clean "$value")' must be relative to source_root" \
-				'write a path like scripts/bootstrap.sh'
-			return 0
-			;;
-		esac
-		if gr_has_dotdot "$value"; then
-			cfg__error "$lineno" "run path '$(gr_clean "$value")' must not contain a '..' segment" \
-				'write the path without ".."'
-			return 0
-		fi
+		cfg__check_relpath "$lineno" 'run path' "$value" 'source_root' \
+			'write a path like scripts/bootstrap.sh' || return 0
 		if cfg__has_meta "$value"; then
 			cfg__error "$lineno" "run path '$(gr_clean "$value")' contains shell metacharacters or whitespace" \
 				'graft only prints this path as a reminder - keep it a plain relative path'
@@ -909,170 +896,170 @@ cfg__check_value() {
 	return 0
 }
 
-cfg__check_keys() {
-	local rec section key value lineno allowed first
-	while IFS= read -r rec; do
-		[ -n "$rec" ] || continue
-		cfg__unpack "$rec"
-		section="$CFG__F1" key="$CFG__F2" value="$CFG__F3" lineno="$CFG__F4"
-		cfg__keys_for_to "$section"
-		allowed="$CFG__KEYS"
-		if ! cfg__in_list "$key" "$allowed"; then
-			cfg__clean_to "$key"
-			cfg__label_to "$section"
-			# shellcheck disable=SC2086 # the key list is a plain word list
-			cfg__suggest_to "$key" $allowed
+# One record of one section. Split out of the loop below so that "this value is
+# already wrong, stop" is a `return` instead of a chain of nested ifs.
+cfg__check_record() {
+	local si="$1" i="$2" allowed="$3" key value lineno
+	key=${CFG_RKEY[i]} value=${CFG_RVAL[i]} lineno=${CFG_RLN[i]}
+	if ! cfg__in_list "$key" "$allowed"; then
+		cfg__label_to "${CFG_SID[si]}"
+		# shellcheck disable=SC2086 # the key list is a plain word list
+		cfg__suggest_to "$key" $allowed
+		cfg__error "$lineno" \
+			"unknown key '$(gr_clean "$key")' in section $CFG__LABEL" \
+			"known keys here: ${allowed// /, }.$CFG__SUGGEST"
+		return 0
+	fi
+	if ! cfg__in_list "$key" "$CFG_KEYS_REPEATABLE"; then
+		cfg__first_in "$si" "$key" || :
+		if [ "$CFG__KI" != "$i" ]; then
 			cfg__error "$lineno" \
-				"unknown key '$CFG__CLEAN' in section $CFG__LABEL" \
-				"known keys here: ${allowed// /, }.$CFG__SUGGEST"
-			continue
+				"key '$key' may appear only once per section (first used on line ${CFG_RLN[CFG__KI]})" \
+				'delete one of the two lines, or move it into its own section'
+			return 0
 		fi
-		if ! cfg__in_list "$key" "$CFG_KEYS_REPEATABLE"; then
-			first=$(cfg__first_lineno "$section" "$key")
-			if [ "$first" != "$lineno" ]; then
-				cfg__error "$lineno" \
-					"key '$key' may appear only once per section (first used on line $first)" \
-					'delete one of the two lines, or move it into its own section'
-				continue
-			fi
-		fi
-		if [ -z "$value" ]; then
-			cfg__error "$lineno" "key '$key' needs a value" "write: $key = <value>"
-			continue
-		fi
-		cfg__check_value "$section" "$key" "$value" "$lineno"
-	done <<<"$CFG_DATA"
+	fi
+	if [ -z "$value" ]; then
+		cfg__error "$lineno" "key '$key' needs a value" "write: $key = <value>"
+		return 0
+	fi
+	cfg__check_value "${CFG_SID[si]}" "$key" "$value" "$lineno"
 }
 
-# One link spec, in the context of the section it was written in.
-cfg__check_link() {
-	local section="$1" value="$2" lineno="$3" src dest kind abs tsource
+# Decompose one `link` value once, for the two readers that have to agree on
+# what it means: cfg__check_link, which turns each verdict into a message, and
+# cfg_target_links, which silently skips what is not usable. They used to split
+# it each in their own way, which is a standing invitation to drift.
+#   CFG__SPEC  remove | link | no-arrow | no-source | no-dest
+#   CFG__SRC   left side, trimmed
+#   CFG__RAW   right side, trimmed - what an error message quotes back
+#   CFG__DEST  right side, normalised - what we compare and store
+#   CFG__KIND  the verdict on CFG__DEST (see cfg__dest_kind_to)
+cfg__split_link() {
+	local value="$1"
+	CFG__SRC='' CFG__RAW='' CFG__DEST='' CFG__KIND=ok
 	case "$value" in
 	'!'*)
-		dest=$(cfg__trim "${value#\!}")
+		cfg__trim_to "${value#\!}"
+		CFG__RAW="$CFG__TRIM"
+		cfg__norm_dest_to "$CFG__TRIM"
+		CFG__SPEC='remove'
+		return 0
+		;;
+	*'->'*) ;;
+	*)
+		CFG__SPEC='no-arrow'
+		return 0
+		;;
+	esac
+	cfg__trim_to "${value%%->*}"
+	CFG__SRC="$CFG__TRIM"
+	cfg__trim_to "${value#*->}"
+	CFG__RAW="$CFG__TRIM"
+	CFG__SPEC='no-source'
+	[ -n "$CFG__SRC" ] || return 0
+	CFG__SPEC='no-dest'
+	[ -n "$CFG__RAW" ] || return 0
+	cfg__dest_kind_to "$CFG__RAW"
+	CFG__SPEC='link'
+	return 0
+}
+
+# One link spec. <tsource> is the target's effective `source` value, or the
+# empty string in [defaults], where there is no single source directory yet.
+cfg__check_link() {
+	local si="$1" lineno="$3" tsource="$4" src dest prev abs reason='' hint=''
+	cfg__split_link "$2"
+	src="$CFG__SRC" dest="$CFG__RAW"
+	case "$CFG__SPEC" in
+	link) ;;
+	remove)
 		if [ -z "$dest" ]; then
 			cfg__error "$lineno" 'link removal names no destination' \
 				'write: link = !<dest-path> to drop a link inherited from [defaults]'
 		fi
 		return 0
 		;;
-	esac
-	case "$value" in
-	*'->'*) ;;
-	*)
-		cfg__error "$lineno" "invalid link value '$(gr_clean "$value")'" \
+	no-arrow)
+		cfg__error "$lineno" "invalid link value '$(gr_clean "$2")'" \
 			'write: link = <source-path> -> <dest-path>, or link = !<dest-path> to drop an inherited link'
 		return 0
 		;;
-	esac
-	src=$(cfg__trim "${value%%->*}")
-	dest=$(cfg__trim "${value#*->}")
-	if [ -z "$src" ]; then
+	no-source)
 		cfg__error "$lineno" 'link source side is empty' \
 			'write: link = <source-path> -> <dest-path>, or "." for the whole source directory'
 		return 0
-	fi
-	if [ -z "$dest" ]; then
+		;;
+	no-dest)
 		cfg__error "$lineno" 'link destination side is empty' \
 			'write: link = <source-path> -> <dest-path>'
 		return 0
-	fi
-	kind=$(cfg__dest_kind "$dest")
-	case "$kind" in
+		;;
+	esac
+	# One line per rejected kind: the pattern, why it is refused and what to do
+	# instead. The two that do not fit the "link destination 'X' ..." shape get
+	# their own arm below.
+	# shellcheck disable=SC2016 # $HOME in the tilde hint is message text
+	case "$CFG__KIND" in
 	ok) ;;
-	absolute)
-		cfg__error "$lineno" "link destination '$(gr_clean "$dest")' must be relative to the checkout root" \
-			'drop the leading "/" - graft only ever writes inside a checkout'
-		;;
-	tilde)
-		# shellcheck disable=SC2016 # $HOME is part of the message text
-		cfg__error "$lineno" "link destination '$(gr_clean "$dest")' must be relative to the checkout root" \
-			'drop the leading "~" - managing $HOME is not what graft does'
-		;;
-	dotdot)
-		cfg__error "$lineno" "link destination '$(gr_clean "$dest")' must not contain a '..' segment" \
-			'write the path without ".." so it provably stays inside the checkout'
-		;;
+	absolute) reason='must be relative to the checkout root' hint='drop the leading "/" - graft only ever writes inside a checkout' ;;
+	tilde) reason='must be relative to the checkout root' hint='drop the leading "~" - managing $HOME is not what graft does' ;;
+	dotdot) reason="must not contain a '..' segment" hint='write the path without ".." so it provably stays inside the checkout' ;;
+	git) reason='would write into the git directory' hint='graft refuses .git and everything below it' ;;
+	control) reason='contains a tab' hint='write the destination as a plain path, without control characters' ;;
 	self)
 		cfg__error "$lineno" 'link destination "." would replace the checkout itself' \
 			'name a path inside the checkout, for example .github'
 		;;
-	git)
-		cfg__error "$lineno" "link destination '$(gr_clean "$dest")' would write into the git directory" \
-			'graft refuses .git and everything below it'
-		;;
-	control)
-		cfg__error "$lineno" "link destination '$(gr_clean "$dest")' contains a tab" \
-			'write the destination as a plain path, without control characters'
-		;;
 	deny:*)
-		cfg__error "$lineno" "link destination '$(gr_clean "$dest")' is on the deny list (${kind#deny:})" \
+		cfg__error "$lineno" "link destination '$(gr_clean "$dest")' is on the deny list (${CFG__KIND#deny:})" \
 			"graft never links over ${CFG_DENY// /, }"
 		;;
 	esac
+	if [ -n "$reason" ]; then
+		cfg__error "$lineno" "link destination '$(gr_clean "$dest")' $reason" "$hint"
+	fi
 	if gr_has_dotdot "$src"; then
 		cfg__error "$lineno" "link source '$(gr_clean "$src")' must not contain a '..' segment" \
 			'sources are relative to the target source directory and must stay inside the context repo'
-		return 0
-	fi
-	case "$section" in
-	target:*)
-		tsource=$(cfg_target_get "${section#target:}" source "${section#target:}")
-		abs=$(cfg__link_source_abs "$tsource" "$src")
-		if ! gr_is_inside "$abs" "$CFG_CTX_ROOT"; then
-			cfg__error "$lineno" "link source '$(gr_clean "$src")' resolves outside the context repo" \
-				"it must stay inside $(gr_clean "$CFG_CTX_ROOT")"
-		fi
-		;;
-	*)
-		# A [defaults] link is resolved per target, so only the lexical rule
-		# can be checked here; each target's own "source" is checked as well.
-		case "$src" in
-		/*)
-			cfg__error "$lineno" "link source '$(gr_clean "$src")' must be relative to the target source directory" \
-				'drop the leading "/" - sources live inside the context repo'
+	else
+		case "${CFG_SID[si]}" in
+		target:*)
+			abs=$(cfg__link_source_abs "$tsource" "$src")
+			if ! gr_is_inside "$abs" "$CFG_CTX_ROOT"; then
+				cfg__error "$lineno" "link source '$(gr_clean "$src")' resolves outside the context repo" \
+					"it must stay inside $(gr_clean "$CFG_CTX_ROOT")"
+			fi
+			;;
+		*)
+			# A [defaults] link is resolved per target, so only the lexical
+			# rule can be checked here; each target's own "source" is checked
+			# as well.
+			case "$src" in
+			/*)
+				cfg__error "$lineno" "link source '$(gr_clean "$src")' must be relative to the target source directory" \
+					'drop the leading "/" - sources live inside the context repo'
+				;;
+			esac
 			;;
 		esac
+	fi
+	# "Two links in one section must not share a destination" (SPEC 4.3).
+	# CFG__SEEN is a module global because the list has to survive back into
+	# the loop in cfg__check_sections, which resets it once per section.
+	dest="$CFG__DEST"
+	[ -n "$dest" ] || return 0
+	case "$CFG__SEEN" in
+	*"$CFG_NL$dest$CFG_TAB"*)
+		prev=${CFG__SEEN#*"$CFG_NL$dest$CFG_TAB"}
+		prev=${prev%%"$CFG_NL"*}
+		cfg__error "$lineno" \
+			"duplicate link destination '$(gr_clean "$dest")' in $(cfg__section_label "${CFG_SID[si]}") (first used on line $prev)" \
+			'two links in one section cannot share a destination'
 		;;
+	*) CFG__SEEN="$CFG__SEEN$dest$CFG_TAB$lineno$CFG_NL" ;;
 	esac
 	return 0
-}
-
-# Link syntax plus "two links in one section must not share a dest" (SPEC 4.3).
-cfg__check_links() {
-	local rec section value lineno dest seen='' d prev
-	while IFS= read -r rec; do
-		[ -n "$rec" ] || continue
-		case "$rec" in
-		*"$CFG_TAB"link"$CFG_TAB"*) ;;
-		*) continue ;;
-		esac
-		cfg__unpack "$rec"
-		[ "$CFG__F2" = link ] || continue
-		section="$CFG__F1" value="$CFG__F3" lineno="$CFG__F4"
-		cfg__check_link "$section" "$value" "$lineno"
-		case "$value" in
-		'!'*) continue ;;
-		*'->'*) ;;
-		*) continue ;;
-		esac
-		dest=$(cfg__norm_dest "$(cfg__trim "${value#*->}")")
-		[ -n "$dest" ] || continue
-		prev=''
-		while IFS= read -r d; do
-			[ -n "$d" ] || continue
-			case "$d" in
-			"$section$CFG_TAB$dest$CFG_TAB"*) prev=${d##*"$CFG_TAB"} ;;
-			esac
-		done <<<"$seen"
-		if [ -n "$prev" ]; then
-			cfg__error "$lineno" \
-				"duplicate link destination '$(gr_clean "$dest")' in $(cfg__section_label "$section") (first used on line $prev)" \
-				'two links in one section cannot share a destination'
-		else
-			seen="$seen$section$CFG_TAB$dest$CFG_TAB$lineno$CFG_NL"
-		fi
-	done <<<"$CFG_DATA"
 }
 
 cfg__check_find() {
@@ -1106,10 +1093,7 @@ cfg__check_find() {
 	case "$strat" in
 	path)
 		case "$arg" in
-		/*) ;;
-		'')
-			# An expanded ${VAR} that was empty: soft fail at discovery time.
-			;;
+		/* | '') ;; # an expanded ${VAR} that was empty soft fails at discovery
 		*)
 			# shellcheck disable=SC2016 # ${VAR} is part of the message text
 			cfg__error "$lineno" "find path argument '$(gr_clean "$arg")' is not absolute" \
@@ -1158,48 +1142,62 @@ cfg__check_find() {
 	return 0
 }
 
-cfg__check_finds() {
-	local rec section value lineno
-	while IFS= read -r rec; do
-		[ -n "$rec" ] || continue
-		case "$rec" in
-		*"$CFG_TAB"find"$CFG_TAB"*) ;;
-		*) continue ;;
+# One pass over the parsed config: every section, then every record in it.
+# This used to be four passes - keys, links, finds, setups - each with its own
+# loop scaffolding and each one re-deriving which section it was looking at.
+# Walking the data once means the section's label, its allowed keys, its
+# effective `source` and its per section "destination already used" list are
+# each worked out exactly once.
+cfg__check_sections() {
+	local si=0 i id allowed tsource
+	while [ "$si" -lt "$CFG_NSEC" ]; do
+		id=${CFG_SID[si]}
+		cfg__keys_for_to "$id"
+		allowed="$CFG__KEYS"
+		tsource=''
+		case "$id" in
+		target:*)
+			cfg__inherited "$si" source "${id#target:}" || :
+			tsource="$CFG__VAL"
+			;;
+		setup:*)
+			# A [setup] without a run key can never be printed as a reminder,
+			# which is the only thing a setup is for.
+			if ! cfg__last_in "$si" run; then
+				cfg__error "${CFG_SLN[si]}" "section $(cfg__section_label "$id") has no 'run' key" \
+					'add: run = <path relative to source_root>'
+			fi
+			;;
 		esac
-		cfg__unpack "$rec"
-		[ "$CFG__F2" = find ] || continue
-		section="$CFG__F1" value="$CFG__F3" lineno="$CFG__F4"
-		CFG__CUR_TARGET=${section#target:}
-		cfg__check_find "$value" "$lineno" 0
-		CFG__CUR_TARGET=''
-	done <<<"$CFG_DATA"
-}
-
-# A [setup] without a run key can never be printed as a reminder, which is the
-# only thing a setup is for.
-cfg__check_setups() {
-	local rec id lineno
-	while IFS= read -r rec; do
-		[ -n "$rec" ] || continue
-		id=$(cfg__field "$rec" 1)
-		case "$id" in setup:*) ;; *) continue ;; esac
-		lineno=$(cfg__field "$rec" 2)
-		if ! cfg__has "$id" run; then
-			cfg__error "$lineno" "section $(cfg__section_label "$id") has no 'run' key" \
-				'add: run = <path relative to source_root>'
-		fi
-	done <<<"$CFG_SECTIONS"
+		# Reset per section: sharing a destination is only a conflict within
+		# one section, and cfg__check_link is where that is reported.
+		CFG__SEEN="$CFG_NL"
+		# shellcheck disable=SC2086 # a list of decimal indices, split on space
+		for i in ${CFG_SREC[si]}; do
+			cfg__check_record "$si" "$i" "$allowed"
+			case "${CFG_RKEY[i]}" in
+			link)
+				cfg__check_link "$si" "${CFG_RVAL[i]}" "${CFG_RLN[i]}" "$tsource"
+				;;
+			find)
+				CFG__CUR_TARGET=${id#target:}
+				cfg__check_find "${CFG_RVAL[i]}" "${CFG_RLN[i]}" 0
+				CFG__CUR_TARGET=''
+				;;
+			esac
+		done
+		si=$((si + 1))
+	done
 }
 
 cfg_validate() {
-	local n
+	local n=0
 	CFG_ERRORS="$CFG_PARSE_ERRORS"
-	cfg__check_keys
-	cfg__check_links
-	cfg__check_finds
-	cfg__check_setups
+	cfg__check_sections
 	cfg__sort_errors
-	n=$(cfg__error_count)
+	# grep -c reads its input to the end. A short circuiting consumer here
+	# would be pitfall P8 all over again.
+	[ -n "$CFG_ERRORS" ] && n=$(grep -c . <<<"$CFG_ERRORS")
 	[ "$n" -gt "$CFG_ERROR_CAP" ] && n="$CFG_ERROR_CAP"
 	return "$n"
 }
@@ -1224,7 +1222,9 @@ cfg_find_conf() {
 cfg_load() {
 	local path="$1" abs
 	CFG_FILE='' CFG_CTX_ROOT='' CFG_SOURCE_ROOT=''
-	CFG_DATA='' CFG_ERRORS='' CFG_SECTIONS='' CFG_PARSE_ERRORS=''
+	CFG_DATA='' CFG_ERRORS='' CFG_PARSE_ERRORS=''
+	CFG_NREC=0 CFG_RSEC=() CFG_RKEY=() CFG_RVAL=() CFG_RLN=()
+	CFG_NSEC=0 CFG_SID=() CFG_SLN=() CFG_SREC=() CFG_SBUCK=() CFG_SDEF=-1
 	abs=$(gr_abspath "$path")
 	CFG_FILE="$abs"
 	CFG_CTX_ROOT=$(dirname -- "$abs")
@@ -1236,6 +1236,7 @@ cfg_load() {
 		return "$GRAFT_EX_USAGE"
 	fi
 	cfg__parse "$abs"
+	cfg__render_data
 	CFG_PARSE_ERRORS="$CFG_ERRORS"
 	CFG_SOURCE_ROOT=$(cfg__resolve_rel "$CFG_CTX_ROOT" "$(cfg_get defaults source_root .)")
 	cfg_validate || :
@@ -1246,12 +1247,13 @@ cfg_load() {
 }
 
 cfg_print_errors() {
-	local rec lineno msg hint src
+	local rec lineno msg hint src rest
 	while IFS= read -r rec; do
 		[ -n "$rec" ] || continue
-		lineno=$(cfg__field "$rec" 1)
-		msg=$(cfg__field "$rec" 2)
-		hint=$(cfg__field "$rec" 3)
+		lineno=${rec%%"$CFG_TAB"*}
+		rest=${rec#*"$CFG_TAB"}
+		msg=${rest%%"$CFG_TAB"*}
+		hint=${rest#*"$CFG_TAB"}
 		if [ "$lineno" = 0 ]; then
 			gr_err "$(gr_clean "$CFG_FILE"): $msg"
 		else
@@ -1271,18 +1273,20 @@ cfg_print_errors() {
 
 # --- effective links ---------------------------------------------------------
 
-# Drop every entry of CFG__LIST whose destination equals $1. Written as an
-# in place filter on a module global because a command substitution would eat
-# the trailing newline of the list on every single removal.
+# Drop every entry of the link list whose destination equals $1. An in place
+# filter over module globals rather than a value returning function, because a
+# command substitution would run it in a subshell and throw the result away.
 cfg__drop_dest() {
-	local dest="$1" out='' rec
-	while IFS= read -r rec; do
-		[ -n "$rec" ] || continue
-		if [ "${rec#*"$CFG_TAB"}" != "$dest" ]; then
-			out="$out$rec$CFG_NL"
+	local dest="$1" i=0 n=0
+	while [ "$i" -lt "$CFG__LN" ]; do
+		if [ "${CFG__LDEST[i]}" != "$dest" ]; then
+			CFG__LSRC[n]=${CFG__LSRC[i]}
+			CFG__LDEST[n]=${CFG__LDEST[i]}
+			n=$((n + 1))
 		fi
-	done <<<"$CFG__LIST"
-	CFG__LIST="$out"
+		i=$((i + 1))
+	done
+	CFG__LN=$n
 }
 
 # Inherited [defaults] links first, then the target's own. A target link with
@@ -1290,33 +1294,33 @@ cfg__drop_dest() {
 # inheriting), and "!dest" drops whatever is currently in the list.
 # Sources are containment checked here; their existence is a plan time concern.
 cfg_target_links() {
-	local t="$1" spec src dest srcabs tsource all rc=0
-	tsource=$(cfg_target_get "$t" source "$t")
+	local t="$1" spec src dest srcabs tsource all rc=0 i=0 si=-1
+	cfg__sec_index "target:$t" && si=$CFG__SI
+	cfg__inherited "$si" source "$t" || :
+	tsource="$CFG__VAL"
 	all=$(
 		cfg_get_all defaults link
 		cfg_get_all "target:$t" link
 	)
-	CFG__LIST=''
+	CFG__LN=0
 	while IFS= read -r spec; do
 		[ -n "$spec" ] || continue
-		case "$spec" in
-		'!'*)
-			cfg__drop_dest "$(cfg__norm_dest "$(cfg__trim "${spec#\!}")")"
+		cfg__split_link "$spec"
+		case "$CFG__SPEC" in
+		link) ;;
+		remove)
+			cfg__drop_dest "$CFG__DEST"
 			continue
 			;;
-		*'->'*) ;;
 		*)
 			rc=1
 			continue
 			;;
 		esac
-		src=$(cfg__trim "${spec%%->*}")
-		dest=$(cfg__norm_dest "$(cfg__trim "${spec#*->}")")
-		if [ -z "$src" ] || [ "$(cfg__dest_kind "$dest")" != ok ]; then
-			rc=1
-			continue
-		fi
-		if gr_has_dotdot "$src"; then
+		src="$CFG__SRC" dest="$CFG__DEST"
+		# Validation has already reported all of this; re-checking is what
+		# keeps invariant I4 true even if a caller skipped cfg_validate.
+		if [ "$CFG__KIND" != ok ] || gr_has_dotdot "$src"; then
 			rc=1
 			continue
 		fi
@@ -1326,8 +1330,13 @@ cfg_target_links() {
 			continue
 		fi
 		cfg__drop_dest "$dest"
-		CFG__LIST="$CFG__LIST$srcabs$CFG_TAB$dest$CFG_NL"
+		CFG__LSRC[CFG__LN]=$srcabs
+		CFG__LDEST[CFG__LN]=$dest
+		CFG__LN=$((CFG__LN + 1))
 	done <<<"$all"
-	printf '%s' "$CFG__LIST"
+	while [ "$i" -lt "$CFG__LN" ]; do
+		printf '%s\t%s\n' "${CFG__LSRC[i]}" "${CFG__LDEST[i]}"
+		i=$((i + 1))
+	done
 	return "$rc"
 }

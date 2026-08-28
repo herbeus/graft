@@ -7,6 +7,12 @@
 # the `find` strategies of *every* target, and that index is cached between runs
 # (docs/SPEC.md sections 3, 4.4 and 9.2).
 #
+# The index is held twice on purpose. DISC_ROWS is the escaped TSV that goes to
+# and comes from the cache file; the DISC_PATH / DISC_ORIGIN / DISC_NORM /
+# DISC_EPOCH arrays are the same rows decoded once per run. Every query reads
+# the arrays. Decoding per query instead cost one shell loop for every
+# (target, checkout) pair, which is quadratic in a machine full of repos.
+#
 # Two rules shape everything below:
 #   - No network (invariant I2). `git remote get-url` reads .git/config and
 #     nothing else; there is no fetch and no ls-remote anywhere in this file.
@@ -30,10 +36,19 @@ DISC_REBUILT=0    # 1 once we have rescanned in this run (the retry budget)
 DISC_STALE=0      # 1 when a cached row disagreed with the filesystem
 DISC_WARNED_SCHEMA=0
 
-DISC_ESC=''                   # scratch output of disc__esc_into
-DISC_UNESC=''                 # scratch output of disc__unesc_into
-DISC_P='' DISC_O='' DISC_E='' # scratch row fields of disc__row_into
-DISC_URL=''                   # scratch output of disc__norm_url_into
+# DISC_ROWS decoded. DISC_NORM holds the origin URL already put through
+# disc__norm_url_into, because every origin match needs it and it never changes.
+DISC_N=0
+DISC_PATH=()
+DISC_ORIGIN=()
+DISC_NORM=()
+DISC_EPOCH=()
+
+DISC_ESC=''   # scratch output of disc__esc_into
+DISC_UNESC='' # scratch output of disc__unesc_into
+DISC_TRIM=''  # scratch output of disc__trim_to
+DISC_URL=''   # scratch output of disc__norm_url_into
+DISC_LIST=''  # candidate list under construction, see disc__add
 
 DISC_MAX_DEPTH=8 # nesting limit for parent-of: / target: (cycle backstop)
 DISC_NL='
@@ -46,11 +61,10 @@ DISC_DEF_PRUNE='node_modules,vendor,target,.cache,Library,dist,build'
 
 # --- small helpers -----------------------------------------------------------
 
-disc__trim() {
+disc__trim_to() {
 	local s="$1"
 	s=${s#"${s%%[![:space:]]*}"}
-	s=${s%"${s##*[![:space:]]}"}
-	printf '%s' "$s"
+	DISC_TRIM=${s%"${s##*[![:space:]]}"}
 }
 
 # TSV escaping per SPEC 3.1. core's gr_tsv_escape is sed-based and therefore
@@ -77,105 +91,50 @@ disc__esc() {
 # stdout: it runs once per cached row, and a command substitution there would
 # mean one fork per checkout on every single run.
 disc__unesc_into() {
-	local s="$1" out='' head bs=$'\\'
+	local s="$1" out='' head
 	case "$s" in
 	'-' | '')
 		DISC_UNESC=''
 		return 0
 		;;
 	esac
-	while [ -n "$s" ]; do
+	while :; do
+		head=${s%%\\*}
+		out="$out$head"
+		[ "$head" = "$s" ] && break
+		s=${s#"$head"\\}
 		case "$s" in
-		"$bs$bs"*)
-			out="$out$bs"
-			s=${s#??}
-			;;
-		"${bs}t"*)
-			out="$out$DISC_TAB"
-			s=${s#??}
-			;;
-		"${bs}n"*)
-			out="$out$DISC_NL"
-			s=${s#??}
-			;;
-		"$bs"*)
-			out="$out$bs"
-			s=${s#?}
-			;;
+		t*) out="$out$DISC_TAB" ;;
+		n*) out="$out$DISC_NL" ;;
+		\\*) out="$out\\" ;;
 		*)
-			head=${s%%"$bs"*}
-			if [ "$head" = "$s" ]; then
-				out="$out$s"
-				s=''
-			else
-				out="$out$head"
-				s=${s#"$head"}
-			fi
+			# An escape we never write: keep the backslash, consume nothing.
+			out="$out\\"
+			continue
 			;;
 		esac
+		s=${s#?}
 	done
 	DISC_UNESC=$out
 }
 
-disc__unesc() {
-	disc__unesc_into "$1"
-	printf '%s' "$DISC_UNESC"
-}
+# Splitting a row is `IFS=$DISC_TAB read -r a b c <<<"$row"` everywhere below.
+# Tab is IFS whitespace, so `read` would collapse a run of tabs and shift every
+# field behind an empty one - but no field on disk is ever empty (SPEC 3.1
+# writes "-" instead), so there is never a run of tabs to collapse.
 
-# disc__row_into <row> - decode a cache row into DISC_P / DISC_O / DISC_E
-# (path, origin URL, last commit epoch) without spawning anything.
-disc__row_into() {
-	local IFS=$'\t'
-	set -f
-	# shellcheck disable=SC2086 # deliberate splitting on IFS=tab
-	set -- $1
-	set +f
-	disc__unesc_into "${1:-}"
-	DISC_P=$DISC_UNESC
-	disc__unesc_into "${2:-}"
-	DISC_O=$DISC_UNESC
-	disc__unesc_into "${3:-}"
-	DISC_E=$DISC_UNESC
-}
-
-# disc__field <row> <n> - nth tab separated field. Fields are never empty on
-# disk (an empty value is written as "-"), so IFS collapsing cannot bite.
-disc__field() {
-	local row="$1" n="$2"
-	local IFS=$'\t'
-	set -f
-	# shellcheck disable=SC2086 # deliberate splitting on IFS=tab
-	set -- $row
-	set +f
-	[ "$n" -le "$#" ] || return 1
-	shift "$((n - 1))"
-	printf '%s' "$1"
-}
-
-# disc__addline <list> <item> - append unless already present.
-disc__addline() {
-	local list="$1" item="$2"
-	case "$DISC_NL$list$DISC_NL" in
-	*"$DISC_NL$item$DISC_NL"*)
-		printf '%s' "$list"
-		return 0
-		;;
+# Append <item> to DISC_LIST unless it is already in it. A module global rather
+# than a value returning function, because `out=$(disc__addline ...)` is a fork
+# per candidate and the strategies below run once per target.
+disc__add() {
+	case "$DISC_NL$DISC_LIST$DISC_NL" in
+	*"$DISC_NL$1$DISC_NL"*) return 0 ;;
 	esac
-	if [ -z "$list" ]; then
-		printf '%s' "$item"
+	if [ -z "$DISC_LIST" ]; then
+		DISC_LIST=$1
 	else
-		printf '%s%s%s' "$list" "$DISC_NL" "$item"
+		DISC_LIST="$DISC_LIST$DISC_NL$1"
 	fi
-}
-
-disc__count() {
-	local n
-	[ -n "$1" ] || {
-		printf '0'
-		return 0
-	}
-	n=$(printf '%s\n' "$1" | wc -l)
-	printf '%s' "${n// /}"
 }
 
 # The origin URL as we compare it: trailing slash and ".git" suffix removed, so
@@ -223,17 +182,11 @@ disc__origin_of() {
 
 # --- config access -----------------------------------------------------------
 #
-# Only the readers documented in SPEC 9.1 are used, so this module can be
-# developed and tested without lib/config.sh being present. Section ids are
-# never spelled out here: cfg_target_finds and cfg_target_verifies take the
-# target name and own the encoding, so this module cannot guess it wrong.
-
-disc__default() {
-	local key="$1" fallback="$2" v
-	v=$(cfg_get_all defaults "$key" 2>/dev/null | tail -n 1)
-	[ -n "$v" ] || v="$fallback"
-	printf '%s' "$v"
-}
+# Only the readers documented in SPEC 9.1 are used - cfg_get, cfg_get_all,
+# cfg_target_finds, cfg_target_verifies - so this module can be developed and
+# tested without lib/config.sh being present. Section ids are never spelled out
+# here: the target readers take the target name and own the encoding, so this
+# module cannot guess it wrong.
 
 # --- cache location ----------------------------------------------------------
 
@@ -252,7 +205,29 @@ disc_cache_dir() {
 disc_cache_file() { printf '%s/checkouts.tsv\n' "$(disc_cache_dir)"; }
 disc_pins_file() { printf '%s/pins.tsv\n' "$(disc_cache_dir)"; }
 
-# --- the scan ----------------------------------------------------------------
+# --- the index -----------------------------------------------------------------
+
+# DISC_ROWS -> the four arrays every query reads. Called once per run, wherever
+# DISC_ROWS is (re)filled.
+disc__decode_rows() {
+	local path origin epoch
+	DISC_N=0
+	DISC_PATH=() DISC_ORIGIN=() DISC_NORM=() DISC_EPOCH=()
+	[ -n "$DISC_ROWS" ] || return 0
+	while IFS="$DISC_TAB" read -r path origin epoch; do
+		[ -n "$path" ] || continue
+		disc__unesc_into "$path"
+		DISC_PATH[DISC_N]=$DISC_UNESC
+		disc__unesc_into "$origin"
+		DISC_ORIGIN[DISC_N]=$DISC_UNESC
+		disc__norm_url_into "$DISC_UNESC"
+		DISC_NORM[DISC_N]=$DISC_URL
+		disc__unesc_into "$epoch"
+		DISC_EPOCH[DISC_N]=$DISC_UNESC
+		DISC_N=$((DISC_N + 1))
+	done <<<"$DISC_ROWS"
+	return 0
+}
 
 # disc_index_build - the single filesystem walk of the run.
 #
@@ -263,7 +238,7 @@ disc_index_build() {
 	local roots root depth maxd prune name rows='' gitpath co origin epoch oldifs
 	local -a prune_expr args
 
-	depth=$(disc__default search_depth "$DISC_DEF_DEPTH")
+	depth=$(cfg_get defaults search_depth "$DISC_DEF_DEPTH" 2>/dev/null)
 	case "$depth" in
 	'' | *[!0-9]*) depth=$DISC_DEF_DEPTH ;;
 	esac
@@ -273,7 +248,7 @@ disc_index_build() {
 	# look for sits one level deeper than the checkout it belongs to.
 	maxd=$((depth + 1))
 
-	prune=$(disc__default search_prune "$DISC_DEF_PRUNE")
+	prune=$(cfg_get defaults search_prune "$DISC_DEF_PRUNE" 2>/dev/null)
 
 	# Prune expression: every dotdir except .git (which the first clause has
 	# already claimed), plus the configured names. Built once, used per root.
@@ -286,11 +261,11 @@ disc_index_build() {
 	set +f
 	IFS=$oldifs
 	for name in "$@"; do
-		name=$(disc__trim "$name")
-		case "$name" in
+		disc__trim_to "$name"
+		case "$DISC_TRIM" in
 		'' | '.' | '..' | */*) continue ;;
 		esac
-		prune_expr+=(-o -name "$name")
+		prune_expr+=(-o -name "$DISC_TRIM")
 	done
 	prune_expr+=(')' -prune)
 
@@ -298,9 +273,9 @@ disc_index_build() {
 	[ -n "$roots" ] || roots="$HOME"
 
 	while IFS= read -r root; do
-		root=$(disc__trim "$root")
-		[ -n "$root" ] || continue
-		root=$(gr_abspath "$root")
+		disc__trim_to "$root"
+		[ -n "$DISC_TRIM" ] || continue
+		root=$(gr_abspath "$DISC_TRIM")
 		[ -d "$root" ] || continue
 		# -H: command line arguments are followed, nothing below them is, so a
 		# symlink loop under the root cannot make the walk run forever.
@@ -332,6 +307,7 @@ disc_index_build() {
 		DISC_ROWS=''
 	fi
 
+	disc__decode_rows
 	disc__write_cache
 	DISC_LOADED=1
 	DISC_FROM_CACHE=0
@@ -361,9 +337,7 @@ disc__read_cache() {
 	while IFS= read -r line; do
 		n=$((n + 1))
 		if [ "$n" = 1 ]; then
-			kind=$(disc__field "$line" 1)
-			ver=$(disc__field "$line" 2)
-			conf=$(disc__field "$line" 3)
+			IFS="$DISC_TAB" read -r kind ver conf <<<"$line"
 			[ "$kind" = '#graft-cache' ] || return 1
 			if [ "$ver" != "$DISC_SCHEMA" ]; then
 				if [ "$DISC_WARNED_SCHEMA" != 1 ]; then
@@ -374,7 +348,8 @@ disc__read_cache() {
 			fi
 			# gr_config_id collisions are harmless because the full config
 			# path is stored here and checked (SPEC section 3).
-			[ "$(disc__unesc "$conf")" = "$(disc__conf_path)" ] || return 1
+			disc__unesc_into "$conf"
+			[ "$DISC_UNESC" = "$(disc__conf_path)" ] || return 1
 			continue
 		fi
 		case "$line" in
@@ -384,13 +359,14 @@ disc__read_cache() {
 		rows="$rows$line$DISC_NL"
 	done <"$f"
 	DISC_ROWS=${rows%"$DISC_NL"}
+	disc__decode_rows
 	DISC_INDEX=$f
 	return 0
 }
 
 # disc_index_load [--rescan]
 disc_index_load() {
-	local line path
+	local i=0
 	DISC_INDEX=$(disc_cache_file)
 	case "${1:-}" in
 	--rescan)
@@ -404,14 +380,13 @@ disc_index_load() {
 	fi
 	# A path in the cache that has vanished means the cache describes a machine
 	# that no longer exists. Half a truth is worse than a rescan.
-	while IFS= read -r line; do
-		[ -n "$line" ] || continue
-		disc__row_into "$line"
-		if [ ! -d "$DISC_P" ]; then
+	while [ "$i" -lt "$DISC_N" ]; do
+		if [ ! -d "${DISC_PATH[i]}" ]; then
 			disc_index_build
 			return
 		fi
-	done <<<"$DISC_ROWS"
+		i=$((i + 1))
+	done
 	DISC_LOADED=1
 	DISC_FROM_CACHE=1
 	return 0
@@ -425,15 +400,15 @@ disc__ensure_index() {
 # disc_info <path> - origin URL and last commit epoch of an indexed checkout,
 # tab separated. bin/graft renders the ambiguity list from this.
 disc_info() {
-	local want="$1" line path
+	local want="$1" i=0
 	disc__ensure_index
-	while IFS= read -r line; do
-		[ -n "$line" ] || continue
-		disc__row_into "$line"
-		[ "$DISC_P" = "$want" ] || continue
-		printf '%s\t%s\n' "$DISC_O" "$DISC_E"
-		return 0
-	done <<<"$DISC_ROWS"
+	while [ "$i" -lt "$DISC_N" ]; do
+		if [ "${DISC_PATH[i]}" = "$want" ]; then
+			printf '%s\t%s\n' "${DISC_ORIGIN[i]}" "${DISC_EPOCH[i]}"
+			return 0
+		fi
+		i=$((i + 1))
+	done
 	return 1
 }
 
@@ -455,8 +430,9 @@ disc_pin() {
 			'#'*) continue ;;
 			esac
 			[ -n "$line" ] || continue
-			key=$(disc__unesc "$(disc__field "$line" 1)")
-			[ "$key" != "$t" ] || continue
+			IFS="$DISC_TAB" read -r key _ <<<"$line"
+			disc__unesc_into "$key"
+			[ "$DISC_UNESC" != "$t" ] || continue
 			out="$out$line$DISC_NL"
 		done <"$f"
 	fi
@@ -475,21 +451,21 @@ disc_pinned() {
 	[ -f "$f" ] || return 1
 	while IFS= read -r line; do
 		n=$((n + 1))
+		IFS="$DISC_TAB" read -r key path _ <<<"$line"
 		if [ "$n" = 1 ]; then
-			[ "$(disc__field "$line" 1)" = '#graft-pins' ] || return 1
-			[ "$(disc__field "$line" 2)" = "$DISC_SCHEMA" ] || return 1
+			[ "$key" = '#graft-pins' ] || return 1
+			[ "$path" = "$DISC_SCHEMA" ] || return 1
 			continue
 		fi
 		case "$line" in
-		'#'*) continue ;;
+		'#'* | '') continue ;;
 		esac
-		[ -n "$line" ] || continue
-		key=$(disc__unesc "$(disc__field "$line" 1)")
-		[ "$key" = "$t" ] || continue
-		path=$(disc__unesc "$(disc__field "$line" 2)")
+		disc__unesc_into "$key"
+		[ "$DISC_UNESC" = "$t" ] || continue
+		disc__unesc_into "$path"
 		# A pin that points at nothing is not an answer.
-		[ -d "$path" ] || return 1
-		printf '%s\n' "$path"
+		[ -d "$DISC_UNESC" ] || return 1
+		printf '%s\n' "$DISC_UNESC"
 		return 0
 	done <"$f"
 	return 1
@@ -529,15 +505,15 @@ disc__by_env() {
 
 # disc__by_origin <glob|re> <pattern>
 disc__by_origin() {
-	local mode="$1" pat="$2" line url path out=''
+	local mode="$1" pat="$2" i=0 url path
 	[ -n "$pat" ] || return 1
 	disc__ensure_index
-	while IFS= read -r line; do
-		[ -n "$line" ] || continue
-		disc__row_into "$line"
-		[ -n "$DISC_O" ] || continue
-		disc__norm_url_into "$DISC_O"
-		url=$DISC_URL
+	DISC_LIST=''
+	while [ "$i" -lt "$DISC_N" ]; do
+		url=${DISC_NORM[i]}
+		path=${DISC_PATH[i]}
+		i=$((i + 1))
+		[ -n "$url" ] || continue
 		if [ "$mode" = glob ]; then
 			# shellcheck disable=SC2254 # the config value IS the glob; matched
 			# by case, never by eval
@@ -551,7 +527,6 @@ disc__by_origin() {
 			# dies of SIGPIPE, and pipefail turns that match into a failure.
 			grep -qE -e "$pat" <<<"$url" 2>/dev/null || continue
 		fi
-		path=$DISC_P
 		# The cached URL is a claim about a checkout, so we check it before we
 		# act on it. If it no longer holds, the row is dropped and the run gets
 		# one rescan - a cache is allowed to be empty, never to be wrong.
@@ -560,14 +535,14 @@ disc__by_origin() {
 			DISC_STALE=1
 			continue
 		fi
-		out=$(disc__addline "$out" "$path")
-	done <<<"$DISC_ROWS"
-	DISC_CANDS=$out
-	[ -n "$out" ]
+		disc__add "$path"
+	done
+	DISC_CANDS=$DISC_LIST
+	[ -n "$DISC_CANDS" ]
 }
 
 disc__by_dir() {
-	local pat="$1" line path out='' p
+	local pat="$1" i=0 p
 	[ -n "$pat" ] || return 1
 	# shellcheck disable=SC2088 # the tilde is meant literally here
 	case "$pat" in
@@ -575,16 +550,15 @@ disc__by_dir() {
 	'~/'*) pat="$HOME/${pat#'~/'}" ;;
 	esac
 	disc__ensure_index
-	while IFS= read -r line; do
-		[ -n "$line" ] || continue
-		disc__row_into "$line"
-		path=$DISC_P
+	DISC_LIST=''
+	while [ "$i" -lt "$DISC_N" ]; do
 		# shellcheck disable=SC2254 # see disc__by_origin
-		case "$path" in
-		$pat) out=$(disc__addline "$out" "$path") ;;
+		case "${DISC_PATH[i]}" in
+		$pat) disc__add "${DISC_PATH[i]}" ;;
 		esac
-	done <<<"$DISC_ROWS"
-	if [ -z "$out" ]; then
+		i=$((i + 1))
+	done
+	if [ -z "$DISC_LIST" ]; then
 		# The glob may name a directory outside every search_root. Pathname
 		# expansion answers that without a second walk. IFS is emptied so that
 		# a pattern containing a space stays one word.
@@ -592,16 +566,16 @@ disc__by_dir() {
 		# shellcheck disable=SC2086 # unquoted on purpose: this is the glob
 		for p in $pat; do
 			[ -d "$p" ] || continue
-			out=$(disc__addline "$out" "$p")
+			disc__add "$p"
 		done
 	fi
-	DISC_CANDS=$out
-	[ -n "$out" ]
+	DISC_CANDS=$DISC_LIST
+	[ -n "$DISC_CANDS" ]
 }
 
 # disc__candidates <find-spec> <depth>
 disc__candidates() {
-	local spec="$1" depth="$2" strat arg inner p out=''
+	local spec="$1" depth="$2" strat arg inner p
 	DISC_CANDS=''
 	if [ "$depth" -gt "$DISC_MAX_DEPTH" ]; then
 		gr_warn "find nesting too deep at '$(gr_clean "$spec")'"
@@ -609,16 +583,16 @@ disc__candidates() {
 	fi
 	case "$spec" in
 	*:*)
-		strat=${spec%%:*}
-		arg=${spec#*:}
+		disc__trim_to "${spec%%:*}"
+		strat=$DISC_TRIM
+		disc__trim_to "${spec#*:}"
+		arg=$DISC_TRIM
 		;;
 	*)
 		gr_warn "find without a strategy: '$(gr_clean "$spec")'"
 		return 1
 		;;
 	esac
-	strat=$(disc__trim "$strat")
-	arg=$(disc__trim "$arg")
 	case "$strat" in
 	path) disc__by_path "$arg" || return 1 ;;
 	env) disc__by_env "$arg" || return 1 ;;
@@ -628,13 +602,14 @@ disc__candidates() {
 	parent-of)
 		disc__candidates "$arg" "$((depth + 1))" || return 1
 		inner=$DISC_CANDS
+		DISC_LIST=''
 		while IFS= read -r p; do
 			[ -n "$p" ] || continue
 			p=$(dirname -- "$p")
 			[ -d "$p" ] || continue
-			out=$(disc__addline "$out" "$p")
+			disc__add "$p"
 		done <<<"$inner"
-		DISC_CANDS=$out
+		DISC_CANDS=$DISC_LIST
 		;;
 	target)
 		# Ambiguity inside the referenced target stays ambiguity here: the
@@ -662,15 +637,15 @@ disc__verify_filter() {
 		[ -n "$path" ] || continue
 		ok=1
 		while IFS= read -r v; do
-			v=$(disc__trim "$v")
-			[ -n "$v" ] || continue
-			[ -e "$path/$v" ] || {
+			disc__trim_to "$v"
+			[ -n "$DISC_TRIM" ] || continue
+			[ -e "$path/$DISC_TRIM" ] || {
 				ok=0
 				break
 			}
 		done <<<"$verifies"
 		[ "$ok" = 1 ] || continue
-		out=$(disc__addline "$out" "$path")
+		if [ -z "$out" ]; then out="$path"; else out="$out$DISC_NL$path"; fi
 	done <<<"$cands"
 	printf '%s' "$out"
 }
@@ -702,15 +677,20 @@ disc__resolve_target() {
 
 	finds=$(cfg_target_finds "$t" 2>/dev/null)
 	while IFS= read -r line; do
-		line=$(disc__trim "$line")
-		[ -n "$line" ] || continue
-		disc__candidates "$line" "$depth" || continue
+		disc__trim_to "$line"
+		[ -n "$DISC_TRIM" ] || continue
+		disc__candidates "$DISC_TRIM" "$depth" || continue
 		filtered=$(disc__verify_filter "$t" "$DISC_CANDS")
 		# A strategy whose candidates all fail `verify` has not matched; the
 		# next strategy gets its turn.
 		[ -n "$filtered" ] || continue
 		DISC_CANDS=$filtered
-		if [ "$(disc__count "$filtered")" = 1 ]; then rc=0; else rc=2; fi
+		# One candidate means one line, because the list is built without a
+		# trailing newline.
+		case "$filtered" in
+		*"$DISC_NL"*) rc=2 ;;
+		*) rc=0 ;;
+		esac
 		break
 	done <<<"$finds"
 

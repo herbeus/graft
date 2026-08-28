@@ -56,6 +56,17 @@ cfg_get_all() {
 	done <<<"$CFG_STUB"
 }
 
+# Last value wins, plus the caller's default when the key is absent.
+cfg_get() {
+	local v
+	v=$(cfg_get_all "$1" "$2" | tail -n 1)
+	if [ -n "$v" ]; then
+		printf '%s\n' "$v"
+	elif [ $# -ge 3 ]; then
+		printf '%s\n' "$3"
+	fi
+}
+
 cfg_target_get() {
 	local t="$1" key="$2" def="${3:-}" v
 	v=$(cfg_get_all "target:$t" "$key" | tail -n 1)
