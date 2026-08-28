@@ -619,3 +619,28 @@ assert_line_present() {
 	MY_CHECKOUT="$SANDBOX/real" disc__by_env MY_CHECKOUT
 	[ "$DISC_CANDS" = "$SANDBOX/real" ]
 }
+
+@test "cache: a stale cache is rebuilt instead of believed" {
+	# The cache remembers a scan, not a decision. Believed forever, it quietly
+	# answers "one candidate" for a target that now has two - which contradicts
+	# the one thing discovery promises: never to pick for you.
+	mkrepo "$SANDBOX/work/one" "https://h/acme/api.git"
+	disc_index_build
+	[ "$DISC_N" -ge 1 ]
+
+	# a second clone appears after the scan
+	mkrepo "$SANDBOX/work/two" "https://h/acme/api.git"
+
+	# a fresh cache is still trusted, which is the point of having one
+	disc_index_load
+	[ "$DISC_FROM_CACHE" = 1 ]
+
+	# an old one is not
+	local f
+	f=$(disc_cache_file)
+	sed -i.bak "1s/\t[0-9]*$/\t$(($(date +%s) - 7200))/" "$f"
+	DISC_FROM_CACHE=0
+	disc_index_load
+	[ "$DISC_FROM_CACHE" != 1 ]
+	[ "$DISC_N" -ge 2 ]
+}

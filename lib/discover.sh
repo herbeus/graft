@@ -315,11 +315,36 @@ disc_index_build() {
 	return 0
 }
 
+# Seconds since the epoch, or empty where date(1) cannot say. An unreadable
+# clock must not stop the tool - it just means the cache is treated as old.
+disc__now() { date +%s 2>/dev/null || printf ''; }
+
+# How long a cache may be believed. The cache is a memory of a scan, not of a
+# decision, and a scan goes stale the moment someone clones a repository. Left
+# unbounded it quietly answers "one candidate" for a target that now has two,
+# which contradicts the one thing discovery promises: never to pick for you.
+# An hour keeps a burst of runs fast and bounds how long a new clone stays
+# invisible. --rescan is the way to not wait.
+DISC_CACHE_TTL=3600
+
+# Build time of the cache that is currently loaded, empty when unknown.
+DISC_BUILT=''
+
+disc__cache_is_fresh() {
+	local now age
+	[ -n "$DISC_BUILT" ] || return 1
+	now=$(disc__now)
+	[ -n "$now" ] || return 1
+	age=$((now - DISC_BUILT))
+	[ "$age" -ge 0 ] && [ "$age" -lt "$DISC_CACHE_TTL" ]
+}
+
 disc__write_cache() {
 	local f
 	f=$(disc_cache_file)
 	{
-		printf '#graft-cache\t%s\t%s\n' "$DISC_SCHEMA" "$(disc__esc "$(disc__conf_path)")"
+		printf '#graft-cache\t%s\t%s\t%s\n' "$DISC_SCHEMA" \
+			"$(disc__esc "$(disc__conf_path)")" "$(disc__now)"
 		printf '#path\torigin\tlast_commit_epoch\n'
 		if [ -n "$DISC_ROWS" ]; then
 			printf '%s\n' "$DISC_ROWS"
@@ -331,13 +356,14 @@ disc__write_cache() {
 # Returns 1 whenever the file on disk cannot be trusted; the caller rescans.
 # A cache format is never allowed to stop the tool (SPEC 3.1).
 disc__read_cache() {
-	local f line n=0 kind ver conf rows=''
+	local f line n=0 kind ver conf built rows=''
 	f=$(disc_cache_file)
 	[ -f "$f" ] || return 1
+	DISC_BUILT=''
 	while IFS= read -r line; do
 		n=$((n + 1))
 		if [ "$n" = 1 ]; then
-			IFS="$DISC_TAB" read -r kind ver conf <<<"$line"
+			IFS="$DISC_TAB" read -r kind ver conf built <<<"$line"
 			[ "$kind" = '#graft-cache' ] || return 1
 			if [ "$ver" != "$DISC_SCHEMA" ]; then
 				if [ "$DISC_WARNED_SCHEMA" != 1 ]; then
@@ -350,6 +376,12 @@ disc__read_cache() {
 			# path is stored here and checked (SPEC section 3).
 			disc__unesc_into "$conf"
 			[ "$DISC_UNESC" = "$(disc__conf_path)" ] || return 1
+			# A cache written before this field existed has no timestamp, and
+			# is therefore treated as old - which is the safe reading.
+			case "$built" in
+			'' | *[!0-9]*) DISC_BUILT='' ;;
+			*) DISC_BUILT="$built" ;;
+			esac
 			continue
 		fi
 		case "$line" in
@@ -375,6 +407,10 @@ disc_index_load() {
 		;;
 	esac
 	if ! disc__read_cache; then
+		disc_index_build
+		return
+	fi
+	if ! disc__cache_is_fresh; then
 		disc_index_build
 		return
 	fi

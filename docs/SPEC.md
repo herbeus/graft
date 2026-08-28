@@ -496,6 +496,12 @@ disc_index_build
 disc_index_load [--rescan]
     Uses the cache when it exists and every listed path still exists, otherwise
     rebuilds. --rescan always rebuilds. Sets DISC_INDEX.
+    The cache is believed for one hour. It remembers a scan, not a decision,
+    and a scan goes stale the moment someone clones a repository - believed
+    without bound it quietly answers "one candidate" for a target that now
+    has two, contradicting the promise never to pick for the user. An hour
+    keeps a burst of runs fast and bounds how long a new clone stays
+    invisible; --rescan is the way not to wait.
 
 disc_resolve <target>
     Walks cfg_target_finds in order, first success wins, then applies every

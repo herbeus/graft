@@ -555,6 +555,13 @@ plan_cmd_link() {
 		if [ "$GRAFT_JSON" = 1 ]; then
 			plan_render
 			plan_summary_line "did"
+		elif [ "$PLAN_N_OK" = 0 ] && [ -n "$GRAFT_ONLY" ]; then
+			# Do not send someone hunting through their discovery patterns for
+			# what is a typo in a flag they just typed.
+			gr_warn "nothing matched --only $(gr_clean "$(printf '%s' "$GRAFT_ONLY" | tr '\n' ' ')")"
+			gr_hint "--only takes a link destination, such as .github or .claude"
+			gr_hint "run graft status to see the destinations this config defines"
+			return "$GRAFT_EX_USAGE"
 		elif [ "$PLAN_N_OK" = 0 ]; then
 			gr_warn "nothing to link: no target resolved to a checkout"
 			gr_hint "check the find patterns in $(gr_clean "$CFG_FILE"), or run: graft status"

@@ -1247,3 +1247,11 @@ EOF
 	assert_output_contains "tried:"
 	assert_output_contains "--path example="
 }
+
+@test "--only that matches nothing blames the flag, not the discovery patterns" {
+	world_basic
+	run "$GRAFT" link --only no-such-destination --yes
+	assert_status 2
+	assert_output_contains "nothing matched --only"
+	assert_output_lacks "find patterns"
+}
