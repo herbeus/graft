@@ -24,6 +24,11 @@ PLAN_AMBIG=""
 # is neither.
 PLAN_MAY_ASK=0
 
+# State records that the current configuration no longer asks for: a link line
+# someone deleted, or a whole target that is gone. They are ours, we know where
+# they are, and nothing else will ever clean them up.
+PLAN_ORPHANS=""
+
 # status groups its lines by target and prefixes each group with the target's
 # description. Everywhere else the (target) suffix on each line is enough.
 PLAN_SHOW_DESC=0
@@ -266,7 +271,62 @@ EOF
 	done <<EOF
 $targets
 EOF
+	plan_collect_orphans
 	return 0
+}
+
+# Is this destination part of the plan we just built?
+plan_has_dest() {
+	local want="$1" rec
+	while IFS= read -r rec; do
+		[ -n "$rec" ] || continue
+		[ "$(plan_field "$rec" 5)" = "$want" ] && return 0
+	done <<EOF
+$PLAN_DATA
+EOF
+	return 1
+}
+
+# Was this target part of what the user asked us to look at?
+plan_in_scope() {
+	local want="$1" named t
+	named=$(printf '%s' "$GRAFT_ARGS" | grep -v '^$' || true)
+	[ -z "$named" ] && return 0
+	while IFS= read -r t; do
+		[ "$t" = "$want" ] && return 0
+	done <<EOF
+$named
+EOF
+	return 1
+}
+
+# Everything we once created that the configuration no longer declares.
+#
+# Without this, deleting a link line from a shared context repo leaves the
+# symlink and its exclude entry on every colleague's machine for good, while
+# link and status both keep reporting that all is well. Reconciling a declared
+# state with reality means noticing what was withdrawn, not only what is new.
+plan_collect_orphans() {
+	PLAN_ORPHANS=""
+	local rec t dest
+	# --only deliberately narrows the plan, so everything outside the filter
+	# would look withdrawn. Never mistake a filter for a deletion.
+	[ -n "$GRAFT_ONLY" ] && return 0
+	while IFS= read -r rec; do
+		[ -n "$rec" ] || continue
+		t=$(st_field "$rec" 1)
+		dest=$(st_field "$rec" 3)
+		plan_in_scope "$t" || continue
+		plan_has_dest "$dest" && continue
+		PLAN_ORPHANS="$PLAN_ORPHANS$rec"$'\n'
+	done <<EOF
+$(st_records)
+EOF
+	return 0
+}
+
+plan_count_orphans() {
+	printf '%s' "$PLAN_ORPHANS" | grep -c . || true
 }
 
 # --- rendering ----------------------------------------------------------------
@@ -478,6 +538,7 @@ plan_cmd_link() {
 	if [ "$GRAFT_DRY_RUN" = 1 ]; then
 		[ "$GRAFT_JSON" = 1 ] || gr_bold "plan (nothing will be changed)"
 		plan_render
+		plan_handle_orphans report
 		plan_summary_line "would"
 		[ "$PLAN_N_PROBLEM" -gt 0 ] && return "$GRAFT_EX_DRIFT"
 		return 0
@@ -489,6 +550,7 @@ plan_cmd_link() {
 	# The silent one-liner is only honest when there is genuinely nothing left:
 	# a skipped target is something the user should hear about exactly once,
 	# not something to hide behind a green tick.
+	PLAN_N_CHANGE=$((PLAN_N_CHANGE + $(plan_count_orphans)))
 	if [ "$PLAN_N_CHANGE" = 0 ] && [ "$PLAN_N_PROBLEM" = 0 ] && [ "$PLAN_N_SKIP" = 0 ]; then
 		if [ "$GRAFT_JSON" = 1 ]; then
 			plan_render
@@ -506,6 +568,7 @@ plan_cmd_link() {
 	if [ "$PLAN_N_CHANGE" -gt 0 ] && plan_first_run; then
 		[ "$GRAFT_JSON" = 1 ] || gr_bold "plan"
 		plan_render
+		plan_handle_orphans report
 		PLAN_SHOWN=1
 		if ! gr_confirm "apply $PLAN_N_CHANGE change(s)?"; then
 			if [ "$GRAFT_NO_INPUT" = 1 ]; then
@@ -518,8 +581,10 @@ plan_cmd_link() {
 		fi
 	fi
 
+	plan_handle_orphans remove
 	plan_execute
 	plan_counts
+	PLAN_N_CHANGE=$((PLAN_N_CHANGE + $(plan_count_orphans)))
 	if [ "$PLAN_SHOWN" = 1 ] && [ "$GRAFT_JSON" != 1 ] && [ "$PLAN_R_DONE" -gt 0 ]; then
 		gr_say ""
 		gr_ok "$(gr_plural "$PLAN_R_DONE" "link in place" "links in place")"
@@ -640,6 +705,39 @@ EOF
 	return 0
 }
 
+# Withdrawn links, listed or removed depending on the command.
+# mode: "report" (status, dry-run) or "remove" (link).
+plan_handle_orphans() {
+	local mode="$1" rec dest where n=0
+	while IFS= read -r rec; do
+		[ -n "$rec" ] || continue
+		dest=$(st_field "$rec" 3)
+		{ [ -L "$dest" ] || [ -e "$dest" ]; } || continue
+		where=$(gr_clean "$(plan_short_path "$dest")")
+		n=$((n + 1))
+		if [ "$GRAFT_JSON" = 1 ]; then
+			plan_unlink_json "$(st_field "$rec" 1)" "$dest" orphan "$mode"
+			[ "$mode" = remove ] && ap_unlink_record "$rec" >/dev/null 2>&1
+			continue
+		fi
+		case "$mode" in
+		remove)
+			AP_RESULT=""
+			if ap_unlink_record "$rec" >/dev/null; then
+				gr_fix "$where  removed, no longer in the configuration"
+			else
+				gr_warn "$where  no longer configured, but left alone ($AP_RESULT)"
+			fi
+			;;
+		*) gr_fix "$where  no longer in the configuration" ;;
+		esac
+	done <<EOF
+$PLAN_ORPHANS
+EOF
+	[ "$mode" = remove ] && [ "$n" -gt 0 ] && st_save
+	return 0
+}
+
 plan_summary_line() {
 	local verb="$1"
 	[ "$GRAFT_JSON" = 1 ] && {
@@ -705,6 +803,7 @@ plan_cmd_status() {
 		gr_bold "context: $(gr_clean "$CFG_CTX_ROOT")"
 	fi
 	plan_render
+	plan_handle_orphans report
 	plan_report_backups
 	plan_summary_line "pending"
 	[ "$PLAN_N_PROBLEM" -gt 0 ] && return "$GRAFT_EX_DRIFT"

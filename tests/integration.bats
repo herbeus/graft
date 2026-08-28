@@ -1167,3 +1167,51 @@ EOF
 
 	[ "$(cat "$FRONTEND/CLAUDE.md")" = "my important file" ]
 }
+
+@test "a link removed from the config is removed from the checkout too" {
+	# Reconciling a declared state with reality has to notice what was
+	# withdrawn, not only what is new. Otherwise deleting a link line from a
+	# shared context repo leaves the symlink and its exclude entry on every
+	# colleague's machine for good, while link and status keep saying all is well.
+	world_basic
+	run "$GRAFT" link --yes frontend
+	assert_status 0
+	[ -L "$FRONTEND/.claude" ]
+
+	sed -i.bak '/-> \.claude$/d' "$CTX/graft.conf"
+
+	# status says so without touching anything
+	run "$GRAFT" status
+	assert_output_contains "no longer in the configuration"
+	[ -L "$FRONTEND/.claude" ]
+
+	# dry-run announces it and still changes nothing
+	run "$GRAFT" link --dry-run
+	assert_output_contains "no longer in the configuration"
+	[ -L "$FRONTEND/.claude" ]
+
+	# link cleans it up, exclude entry included
+	run "$GRAFT" link --yes
+	assert_status 0
+	[ ! -L "$FRONTEND/.claude" ]
+	[ -L "$FRONTEND/.github" ]
+	run grep -c '^\.claude$' "$FRONTEND/.git/info/exclude"
+	[ "$output" = 0 ]
+
+	# and then it is quiet again
+	run "$GRAFT" link
+	assert_status 0
+	assert_output_contains "nothing to do"
+}
+
+@test "--only narrows the plan without looking like a deletion" {
+	# Everything outside the filter is absent from the plan. Treating that as
+	# "withdrawn from the config" would make --only delete the rest.
+	world_basic
+	run "$GRAFT" link --yes frontend
+	assert_status 0
+	run "$GRAFT" link --yes --only .github
+	assert_status 0
+	[ -L "$FRONTEND/.claude" ]
+	[ -L "$FRONTEND/.github" ]
+}

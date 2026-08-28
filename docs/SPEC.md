@@ -387,6 +387,13 @@ For one (target, link spec) pair. `SRC` = resolved source, `DST` = destination.
         .github
         # graft: end
 9.  record everything in state
+
+Reconciliation is two-sided. A state record whose destination the current
+configuration no longer declares is an orphan: `status` reports it, `link`
+removes it and its exclude entry. Without that, withdrawing a link line from a
+shared context repo leaves the symlink on every colleague's machine for good.
+`--only` is exempt - it narrows the plan on purpose, and a filter must never be
+mistaken for a deletion.
 ```
 
 `unlink` reverses steps 9..6, verifying against the filesystem at every step
