@@ -494,8 +494,12 @@ disc__by_env() {
 		return 1
 		;;
 	esac
-	# Indirect expansion, not eval: the value is data and is never executed.
-	val=${!name:-}
+	# From the ENVIRONMENT, not from the shell's variables. `${!name}` executes
+	# nothing, but it cannot tell an exported variable from one of graft's own
+	# locals - so `find = env:CFG_CTX_ROOT` in a config file you cloned from a
+	# colleague resolved to the context repo itself. A config may read the
+	# environment; it does not get to read the program.
+	val=$(printenv -- "$name" 2>/dev/null) || val=
 	# Unset or empty is a soft failure, not an error (SPEC 4.4).
 	[ -n "$val" ] || return 1
 	p=$(gr_abspath "$val")

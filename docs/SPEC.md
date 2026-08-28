@@ -149,7 +149,13 @@ Lexical rules:
   - a leading `~/` expands to `$HOME/`
   - `${NAME}` expands to the environment variable `NAME` (`[A-Za-z_][A-Za-z0-9_]*`
     only) and only inside `path:` / `env:` strategy arguments and `search_root`.
-    Undefined variable expands to empty, which makes the strategy fail softly.
+    An undefined variable keeps its `${NAME}` spelling instead of expanding to
+    nothing, and the strategy then fails softly at discovery. Expanding to
+    nothing was the original rule and it was wrong twice over: `path:${WORK}`
+    collapsed to `path:`, an empty argument that validation correctly calls a
+    broken line - so one committed config refused to load for every colleague
+    who had not exported WORK. And the leftover text is what the "tried: ..."
+    diagnostic prints, which names the missing variable rather than a blank.
 - Some keys are **repeatable**: `link`, `find`, `verify` and `search_root`.
   Order is preserved. Repeating a non-repeatable key is an error naming both
   line numbers.

@@ -1147,3 +1147,23 @@ EOF
 	run find -L "$FRONTEND/.github" -name conventions.md
 	assert_output_contains "conventions.md"
 }
+
+@test "unlink restores the backup even after the context repo was moved" {
+	# The state file is addressed by the path of graft.conf, so renaming or
+	# moving the context repo starts a fresh state. The repoint run then
+	# records no backup, and the old record - the only thing that knew where
+	# the user's file went - is orphaned. unlink used to remove the link,
+	# restore nothing, and report success.
+	world_basic
+	printf 'my important file\n' >"$FRONTEND/CLAUDE.md"
+	run "$GRAFT" link --yes frontend
+	assert_status 0
+
+	mv "$CTX" "$SANDBOX/moved-ctx"
+	run "$GRAFT" --config "$SANDBOX/moved-ctx/graft.conf" link --yes
+	assert_status 0
+	run "$GRAFT" --config "$SANDBOX/moved-ctx/graft.conf" unlink --yes
+	assert_status 0
+
+	[ "$(cat "$FRONTEND/CLAUDE.md")" = "my important file" ]
+}

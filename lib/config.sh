@@ -231,7 +231,7 @@ cfg__expand_tilde() {
 # an undefined variable becomes empty so the strategy fails softly (SPEC 4).
 # shellcheck disable=SC2016 # "${" is a literal to be found, not an expansion
 cfg__expand_vars() {
-	local s="$1" out='' pre rest name
+	local s="$1" out='' pre rest name var
 	while :; do
 		case "$s" in
 		*'${'*) ;;
@@ -252,7 +252,21 @@ cfg__expand_vars() {
 		name=${rest%%'}'*}
 		case "$name" in
 		'' | [!A-Za-z_]* | *[!A-Za-z0-9_]*) out="$out$pre\${$name}" ;;
-		*) out="$out$pre$(cfg__env_get "$name")" ;;
+		*)
+			var=$(cfg__env_get "$name")
+			# An unset variable keeps its ${NAME} spelling rather than
+			# vanishing. Two reasons. `find = path:${WORK}` would otherwise
+			# collapse to `path:` - an empty argument, which validation
+			# rightly calls a broken line, so a committed config blew up for
+			# every colleague who did not happen to export WORK. And the
+			# leftover text is what the "tried: ..." diagnostic then shows,
+			# which names the variable instead of printing a blank.
+			if [ -n "$var" ]; then
+				out="$out$pre$var"
+			else
+				out="$out$pre\${$name}"
+			fi
+			;;
 		esac
 		s=${rest#*'}'}
 	done
@@ -1092,8 +1106,14 @@ cfg__check_find() {
 	fi
 	case "$strat" in
 	path)
+		# A ${VAR} that is still spelled out is a variable this machine does
+		# not have. That is a fact about the machine, not a mistake in the
+		# file - the same committed config has to work for the colleague who
+		# does export it. It fails softly at discovery instead, and the
+		# "tried: path:${VAR}" line names what was missing.
+		# shellcheck disable=SC2016 # matching a literal ${, not expanding
 		case "$arg" in
-		/* | '') ;; # an expanded ${VAR} that was empty soft fails at discovery
+		/* | '' | *'${'*) ;;
 		*)
 			# shellcheck disable=SC2016 # ${VAR} is part of the message text
 			cfg__error "$lineno" "find path argument '$(gr_clean "$arg")' is not absolute" \

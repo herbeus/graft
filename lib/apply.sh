@@ -875,6 +875,19 @@ ap_unlink_at() {
 		return 1
 	fi
 
+	# A record with no backup pointer is not proof that there is no backup.
+	# The state file is addressed by the path of graft.conf, so moving or
+	# renaming the context repo starts a fresh state; the next run repoints the
+	# links and records backup='-', and the old record - the only thing that
+	# knew where the user's file went - is orphaned. unlink then removed the
+	# link, restored nothing, and reported success, leaving the user with just
+	# a .graft-backup.<date> where their file used to be.
+	#
+	# So when the record has nothing, ask the filesystem, under the same
+	# one-unambiguous-candidate rule the stateless path uses.
+	if [ -z "$backup" ]; then
+		backup=$(ap__lone_backup "$dest")
+	fi
 	if [ -n "$backup" ] && { [ -L "$backup" ] || [ -e "$backup" ]; }; then
 		if [ -L "$dest" ] || [ -e "$dest" ]; then
 			gr_warn "not restoring $(gr_clean "$backup"): $(gr_clean "$dest") is in the way"
@@ -940,6 +953,21 @@ ap_unlink_record() {
 # where it points, so "points into the context repo" becomes the whole test. A
 # single obvious backup next to the destination is restored; anything more
 # ambiguous is left for the user to sort out.
+# The one backup sitting next to a destination, or empty if there are none or
+# several. Ambiguity is deliberately treated as "do not touch": moving the wrong
+# directory onto a path the user is still using is worse than leaving a file
+# named .graft-backup.<date> for them to look at.
+ap__lone_backup() {
+	local dest="${1%/}" cand out='' n=0
+	for cand in "$dest$AP_BACKUP_SUFFIX"*; do
+		{ [ -L "$cand" ] || [ -e "$cand" ]; } || continue
+		out="$cand"
+		n=$((n + 1))
+	done
+	[ "$n" = 1 ] && printf '%s' "$out"
+	return 0
+}
+
 ap_unlink_dest() {
 	local checkout="$1" rel="${2#./}" ctx="${3:-}" co dest backup='' cand n=0
 	rel=${rel%/}
@@ -948,12 +976,7 @@ ap_unlink_dest() {
 	dest=$(gr_abspath "${co%/}/$rel")
 	dest=${dest%/}
 
-	for cand in "$dest$AP_BACKUP_SUFFIX"*; do
-		{ [ -L "$cand" ] || [ -e "$cand" ]; } || continue
-		backup="$cand"
-		n=$((n + 1))
-	done
-	[ "$n" = 1 ] || backup=''
+	backup=$(ap__lone_backup "$dest")
 
 	ap_unlink_at "${co%/}" "$dest" '' "$backup" yes '' "$ctx"
 }

@@ -693,7 +693,10 @@ assert_no_errors() {
 	run cfg_get_all defaults search_root
 	[ "${lines[0]}" = "$HOME/code" ]
 	[ "${lines[1]}" = "$SANDBOX/checkouts/team" ]
-	[ "${lines[2]}" = "/team" ]
+	# An unset variable keeps its spelling: it fails softly at discovery and
+	# the diagnostic can name what was missing. Expanding it away turned
+	# "path:${WORK}" into "path:", which validation rejects outright.
+	[ "${lines[2]}" = '${GRAFT_UNSET_VAR}/team' ]
 
 	run cfg_target_finds demo
 	[ "${lines[0]}" = "path:$HOME/code/demo" ]
@@ -930,4 +933,25 @@ assert_no_errors() {
 		return 1
 		;;
 	esac
+}
+
+@test "config: an unset variable in path: is a soft miss, not a broken file" {
+	# A committed config has to load on a machine that does not export the
+	# variable. It used to collapse to "path:" and be rejected as an empty
+	# argument, so one person's unset variable broke the file for everyone.
+	conf <<-'EOF'
+		[target "demo"]
+		find = path:${GRAFT_TEST_UNSET}
+		link = github -> .github
+	EOF
+	[ "$rc" = 0 ]
+
+	# ... while a genuinely relative path is still an error
+	conf <<-'EOF'
+		[target "demo"]
+		find = path:relative/x
+		link = github -> .github
+	EOF
+	[ "$rc" != 0 ]
+	assert_error "is not absolute"
 }

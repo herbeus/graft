@@ -600,3 +600,22 @@ assert_line_present() {
 	printf 'expected a line %s in:\n%s\n' "$want" "$OUT" >&2
 	return 1
 }
+
+@test "env: reads the environment, not graft's own variables" {
+	# `${!name}` executes nothing, but it cannot tell an exported variable from
+	# one of graft's locals - so `find = env:CFG_CTX_ROOT` in a config file you
+	# cloned from a colleague resolved to the context repo itself.
+	local secret="$SANDBOX/should-not-be-reachable"
+	mkdir -p "$secret"
+	# a shell variable that is deliberately NOT exported
+	CFG_CTX_ROOT="$secret"
+
+	run disc__by_env CFG_CTX_ROOT
+	[ "$status" -ne 0 ]
+
+	# a real environment variable still works
+	mkdir -p "$SANDBOX/real"
+	DISC_CANDS=""
+	MY_CHECKOUT="$SANDBOX/real" disc__by_env MY_CHECKOUT
+	[ "$DISC_CANDS" = "$SANDBOX/real" ]
+}
