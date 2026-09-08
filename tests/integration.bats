@@ -1255,3 +1255,127 @@ EOF
 	assert_output_contains "nothing matched --only"
 	assert_output_lacks "find patterns"
 }
+
+# --- add ----------------------------------------------------------------------
+#
+# add is the only command that writes to graft.conf, so most of these describe
+# what it must NOT do to a file the user maintains by hand.
+
+@test "add: registers the checkout it runs in, and link then finds it" {
+	world_basic
+	local api="$HOME/work/payments-api"
+	mkrepo "$api" "git@git.example.com:acme/payments-api.git"
+	printf 'module payments\n' >"$api/go.mod"
+	ctx_file projects/payments-api/github/copilot-instructions.md '# api'
+
+	cd "$api" || return 1
+	run "$GRAFT" -C "$CTX/graft.conf" add
+	assert_status 0
+	assert_output_contains "origin:*git.example.com/acme/payments-api"
+
+	cd "$CTX" || return 1
+	run "$GRAFT" link --yes payments-api
+	assert_status 0
+	assert_symlink_to "$api/.github" "$CTX/projects/payments-api/github"
+}
+
+@test "add: an https clone and an scp-style clone produce the same pattern" {
+	world_basic
+	local a="$HOME/work/one" b="$HOME/work/two"
+	mkrepo "$a" "https://git.example.com/acme/thing.git"
+	mkrepo "$b" "git@git.example.com:acme/thing.git"
+
+	cd "$a" || return 1
+	run "$GRAFT" -C "$CTX/graft.conf" add --dry-run --as one
+	assert_status 0
+	assert_output_contains "origin:*git.example.com/acme/thing"
+
+	cd "$b" || return 1
+	run "$GRAFT" -C "$CTX/graft.conf" add --dry-run --as two
+	assert_status 0
+	assert_output_contains "origin:*git.example.com/acme/thing"
+}
+
+@test "add --dry-run leaves the config and the source root untouched" {
+	world_basic
+	local api="$HOME/work/api2" before
+	mkrepo "$api" "https://git.example.com/acme/api2.git"
+	before=$(cat "$CTX/graft.conf")
+
+	cd "$api" || return 1
+	run "$GRAFT" -C "$CTX/graft.conf" add --dry-run
+	assert_status 0
+	[ "$(cat "$CTX/graft.conf")" = "$before" ]
+	assert_not_exists "$CTX/projects/api2"
+}
+
+@test "add: appends only, so comments and existing blocks survive byte for byte" {
+	world_init
+	local api="$HOME/work/api3" before
+	mkrepo "$api" "https://git.example.com/acme/api3.git"
+	writeconf "$CTX" <<-'CONF'
+		# a comment the user wrote and expects to keep
+		[defaults]
+		source_root = projects
+		search_root = ~
+
+		# another one, in the middle
+		[target "kept"]
+		find = origin:*/acme/kept
+	CONF
+	before=$(cat "$CTX/graft.conf")
+
+	cd "$api" || return 1
+	run "$GRAFT" -C "$CTX/graft.conf" add
+	assert_status 0
+	# the old content is still the head of the file, unchanged
+	[ "$(head -c "${#before}" "$CTX/graft.conf")" = "$before" ]
+	run "$GRAFT" -C "$CTX/graft.conf" check
+	assert_status 0
+}
+
+@test "add: guesses verify from a manifest, and --verify overrides the guess" {
+	world_basic
+	local api="$HOME/work/api4"
+	mkrepo "$api" "https://git.example.com/acme/api4.git"
+	printf '{}\n' >"$api/package.json"
+
+	cd "$api" || return 1
+	run "$GRAFT" -C "$CTX/graft.conf" add --dry-run
+	assert_status 0
+	assert_output_contains "verify = package.json"
+
+	run "$GRAFT" -C "$CTX/graft.conf" add --dry-run --verify README.md
+	assert_status 0
+	assert_output_contains "verify = README.md"
+}
+
+@test "add: refuses a name that is already a target" {
+	world_basic
+	local dup="$HOME/work/backend-again"
+	mkrepo "$dup" "https://git.example.com/acme/backend.git"
+
+	cd "$dup" || return 1
+	run "$GRAFT" -C "$CTX/graft.conf" add --as backend
+	assert_status 2
+	assert_output_contains "already exists"
+}
+
+@test "add: refuses a directory that is not a git checkout" {
+	world_basic
+	mkdir -p "$HOME/plain"
+	cd "$HOME/plain" || return 1
+	run "$GRAFT" -C "$CTX/graft.conf" add
+	assert_status 2
+	assert_output_contains "not inside a git checkout"
+}
+
+@test "add: refuses a checkout that has no origin remote" {
+	world_basic
+	local bare="$HOME/work/noremote"
+	mkrepo "$bare"
+	cd "$bare" || return 1
+	run "$GRAFT" -C "$CTX/graft.conf" add
+	assert_status 2
+	assert_output_contains "no origin remote"
+}

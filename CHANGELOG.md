@@ -12,7 +12,13 @@ will not change without a deprecation notice: the **exit codes** and the
 
 ## [Unreleased]
 
-Nothing yet.
+### Added
+
+- `graft add [<dir>]` - append a `[target]` block for a checkout, derived from
+  that checkout's own origin URL, so the pattern does not have to be written by
+  hand. `--as` names the target, `--verify` overrides the guessed marker file,
+  `--dry-run` prints the block instead of writing it. It only ever appends to
+  `graft.conf`.
 
 ## [0.1.0] - 2026-09-08
 

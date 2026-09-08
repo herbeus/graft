@@ -961,7 +961,7 @@ plan_cmd_adopt() {
 	done <<EOF
 $GRAFT_ARGS
 EOF
-	name="$GRAFT_ADOPT_AS"
+	name="$GRAFT_AS"
 	[ -n "$dir" ] || gr_die "$GRAFT_EX_USAGE" "adopt needs a directory: graft adopt <dir> --as NAME"
 	[ -n "$name" ] || gr_die "$GRAFT_EX_USAGE" "adopt needs --as NAME"
 	dir=$(gr_abspath "$dir")
@@ -1083,6 +1083,118 @@ EOF
 	gr_hint "your content is safe at $(gr_clean "$src")"
 	gr_hint "move it back with: mv -- $(gr_clean "$src") $(gr_clean "$dir")"
 	return "$GRAFT_EX_DRIFT"
+}
+
+# add is the counterpart to init: init scaffolds the file, add registers one
+# more checkout in it. It runs *inside the checkout*, because that is where the
+# origin URL already is. Having to look that URL up and translate it into a glob
+# by hand was the one clumsy step left in an otherwise URL-driven design.
+#
+# It only ever appends. graft.conf is written by hand, commented and ordered on
+# purpose, so a command that rewrote it would cost the user more than it saves.
+plan_cmd_add() {
+	local dir name checkout pattern verify cand line src block rel
+	dir=""
+	while IFS= read -r line; do
+		[ -n "$line" ] || continue
+		dir="$line"
+		break
+	done <<EOF
+$GRAFT_ARGS
+EOF
+	[ -n "$dir" ] || dir="$PWD"
+	dir=$(gr_abspath "$dir")
+	[ -d "$dir" ] || gr_die "$GRAFT_EX_USAGE" "no such directory: $(gr_clean "$dir")"
+
+	checkout=$(git -C "$dir" rev-parse --show-toplevel 2>/dev/null </dev/null) || checkout=""
+	if [ -z "$checkout" ]; then
+		gr_err "$(gr_clean "$dir") is not inside a git checkout"
+		gr_hint "run graft add from the repository you want to add, or name it:"
+		gr_hint "  graft add <checkout>"
+		return "$GRAFT_EX_USAGE"
+	fi
+
+	if ! pattern=$(disc_origin_pattern "$checkout"); then
+		gr_err "$(gr_clean "$checkout") has no origin remote"
+		gr_hint "graft finds checkouts by remote URL. Without one, write the target"
+		gr_hint "by hand with a dir: or path: strategy - see docs/SPEC.md 4.4"
+		return "$GRAFT_EX_USAGE"
+	fi
+
+	name="$GRAFT_AS"
+	[ -n "$name" ] || name=$(basename -- "$pattern")
+	case "$name" in
+	'' | *:* | *'"'* | *' '* | *'	'*)
+		gr_err "not a usable target name: $(gr_clean "$name")"
+		gr_hint "names cannot contain a colon, a quote or whitespace (SPEC 4.2)"
+		gr_hint "pick one: graft add --as NAME"
+		return "$GRAFT_EX_USAGE"
+		;;
+	esac
+
+	if plan_target_exists "$name"; then
+		gr_err "target '$(gr_clean "$name")' already exists in $(gr_clean "$CFG_FILE")"
+		gr_hint "edit that block, or add this checkout under another name:"
+		gr_hint "  graft add --as NAME"
+		return "$GRAFT_EX_USAGE"
+	fi
+
+	# verify is a guess, and it is allowed to be one: it only ever narrows a
+	# match, and the user reads the line we wrote before anything is linked.
+	# The order is by how strongly a file identifies *this* project rather than
+	# any project - a Makefile says far less than a lockfile-bearing manifest.
+	verify="$GRAFT_ADD_VERIFY"
+	if [ -z "$verify" ]; then
+		for cand in package.json go.mod Cargo.toml pyproject.toml pom.xml \
+			build.gradle build.gradle.kts composer.json Gemfile mix.exs \
+			CMakeLists.txt Makefile; do
+			if [ -e "$checkout/$cand" ]; then
+				verify="$cand"
+				break
+			fi
+		done
+	fi
+
+	block="[target \"$name\"]"$'\n'"find = origin:$pattern"
+	[ -n "$verify" ] && block="$block"$'\n'"verify = $verify"
+
+	if [ "$GRAFT_DRY_RUN" = 1 ]; then
+		gr_say "would append to $(gr_clean "$CFG_FILE"):"
+		gr_say ""
+		printf '%s\n' "$block"
+		gr_say ""
+		gr_say "would create $(gr_clean "$CFG_SOURCE_ROOT/$name")/"
+		return 0
+	fi
+
+	printf '\n%s\n' "$block" >>"$CFG_FILE" || {
+		gr_err "cannot write to $(gr_clean "$CFG_FILE")"
+		return "$GRAFT_EX_ENV"
+	}
+	src="$CFG_SOURCE_ROOT/$name"
+	mkdir -p -- "$src" || {
+		gr_err "cannot create $(gr_clean "$src")"
+		return "$GRAFT_EX_ENV"
+	}
+
+	gr_ok "added target '$name' to $(gr_clean "$CFG_FILE")"
+	gr_ok "matching $(gr_clean "$checkout") by origin:$pattern"
+	[ -n "$verify" ] && gr_ok "verify = $verify (change it if that is the wrong marker)"
+	gr_ok "created $(gr_clean "$src")/"
+	gr_say ""
+	gr_say "next: put the shared content in there. The inherited links expect:"
+	while IFS= read -r line; do
+		[ -n "$line" ] || continue
+		rel=${line%%-\>*}
+		# shellcheck disable=SC2001 # trimming both ends, sed is the clear way
+		rel=$(printf '%s' "$rel" | sed 's/[[:space:]]*$//')
+		[ -n "$rel" ] || continue
+		gr_say "      $(gr_clean "$src")/$rel"
+	done <<EOF
+$(cfg_get_all defaults link)
+EOF
+	gr_say "      then: graft check && graft link --dry-run"
+	return 0
 }
 
 plan_cmd_init() {

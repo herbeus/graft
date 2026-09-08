@@ -260,6 +260,7 @@ graft status [<target>...]           report only, never writes
 graft check                          validate graft.conf, never touches the FS
 graft unlink [<target>...]           remove our links, restore backups
 graft adopt <dir> --as <target>      take an existing dir into the context repo
+graft add [<dir>] [--as <target>]    append a target for a checkout
 graft init                           scaffold graft.conf
 graft version | help
 ```
@@ -295,6 +296,36 @@ destination (that rule, not `adopt`, decides where in the context repo the
 content lands); and the resulting source path is still free. `--dry-run` prints
 the plan and returns 0.
 
+### 5.0.1 `add`
+
+`add [<dir>] [--as <name>] [--verify <path>]` appends one `[target]` block for a
+checkout. `<dir>` defaults to `$PWD`, so the normal call is `graft add` from
+inside the repository being added; the config comes from `--config`,
+`GRAFT_CONFIG` or the usual upward search, which in a foreign checkout means one
+of the first two.
+
+The pattern is derived from the checkout's own origin URL, normalised as in 4.4
+and then cut at the host: scheme and any `user@` are dropped and a single `*`
+takes their place, so `git@host:acme/api.git` and `https://host/acme/api` both
+yield `origin:*host/acme/api`. It is anchored at the end - a glob has to match
+the whole URL - so `acme/api-archive` does not match it.
+
+`--as` names the target; without it the last path segment of the URL is used.
+`verify` is guessed from the first of a short list of manifest files that exists
+in the checkout (`package.json`, `go.mod`, `Cargo.toml`, ... `Makefile` last, as
+the weakest marker) and omitted when none does; `--verify` sets it explicitly. A
+guess is acceptable here because `verify` only ever narrows a match, and the
+user reads the written line before anything is linked.
+
+**It only ever appends**, and it writes nothing else: `graft.conf` is
+hand-written, commented and ordered on purpose. It also creates
+`<source_root>/<name>/`, then names the sources the inherited `link` rules
+expect, because a target whose source is missing is what `check` reports next.
+
+Preconditions, each an exit 2: `<dir>` exists and is inside a git checkout; that
+checkout has an origin remote; the resulting name is usable as a section name
+(4.2) and is not already a target. `--dry-run` prints the block and returns 0.
+
 ### 5.1 Global flags
 
 ```
@@ -312,7 +343,8 @@ the plan and returns 0.
 ```
 
 `--force` exists only for `link` and only relaxes `on_foreign_link`. It never
-relaxes I5 (tracked paths) and never suppresses backups.
+relaxes I5 (tracked paths) and never suppresses backups. `--as` belongs to
+`adopt` and `add`, `--verify` to `add` alone.
 
 ### 5.2 Exit codes
 
@@ -509,6 +541,11 @@ disc_resolve <target>
     Returns 0 found, 1 not found, 2 ambiguous (several candidates).
     On ambiguity it prints all candidates, one per line, and lets the caller
     decide - never picks one itself.
+
+disc_origin_pattern <checkout>
+    The `find = origin:` pattern for a checkout, from its own origin URL:
+    normalised as above, then cut at the host, with a leading `*`.
+    Prints e.g. *github.com/acme/api. Returns 1 when there is no origin.
 
 disc_pin <target> <dir>     record a user-supplied path (--path) in the cache
 disc_pinned <target>        print a pinned path, or return 1

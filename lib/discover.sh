@@ -190,6 +190,25 @@ disc__origin_of() {
 
 # --- cache location ----------------------------------------------------------
 
+# The `find = origin:` pattern for a checkout, derived from its own origin URL.
+# Prints e.g. *github.com/acme/api, or returns 1 when there is no origin remote.
+#
+# Everything before the host is dropped - the scheme, and any user@ in front of
+# it - because that is exactly the part that differs between an https clone and
+# an ssh one. What remains is what makes the pattern survive being committed and
+# handed to someone who clones differently than you do.
+disc_origin_pattern() {
+	local co="$1" url
+	url=$(disc__origin_of "$co")
+	[ -n "$url" ] || return 1
+	disc__norm_url_into "$url"
+	url=$DISC_URL
+	url=${url#*://}
+	url=${url#*@}
+	[ -n "$url" ] || return 1
+	printf '*%s\n' "$url"
+}
+
 disc__conf_path() {
 	if [ -n "${CFG_FILE:-}" ]; then
 		gr_abspath "$CFG_FILE"

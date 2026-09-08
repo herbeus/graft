@@ -282,9 +282,29 @@ graft status [<target>...]   show what is linked, drifted or missing
 graft check                  validate graft.conf, touch nothing
 graft unlink [<target>...]   remove our links and restore backups
 graft adopt <dir> --as NAME  take an existing dir into the context repo
+graft add [<dir>]            register this checkout as a target
 graft init                   write a starter graft.conf
 graft help | version
 ```
+
+`graft add` is how a repository gets into the config without editing it. Run it
+in the checkout you want to add: it reads that repo's own origin URL, turns it
+into the `origin:` pattern - cut at the host, so an ssh clone and an https clone
+produce the same line - guesses `verify` from a manifest file if it finds one,
+and appends the block. It only ever appends; your comments and your ordering are
+none of its business.
+
+```
+$ cd ~/work/payments-api && graft add
+  ✓ added target 'payments-api' to ~/context/graft.conf
+  ✓ matching ~/work/payments-api by origin:*github.com/acme/payments-api
+  ✓ verify = go.mod (change it if that is the wrong marker)
+  ✓ created ~/context/projects/payments-api/
+```
+
+Because the checkout is not inside your context repo, `add` needs to be told
+which config to write to - `graft -C ~/context/graft.conf add`, or set
+`GRAFT_CONFIG` once in your shell.
 
 `graft status` never writes. It groups its lines by target and puts each
 target's `description` above its group, which is the one place that key earns

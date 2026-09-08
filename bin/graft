@@ -64,6 +64,7 @@ usage:
   graft check                  validate graft.conf, touch nothing
   graft unlink [<target>...]   remove our links and restore backups
   graft adopt <dir> --as NAME  take an existing dir into the context repo
+  graft add [<dir>] [--as N]   register this checkout as a target
   graft init                   write a starter graft.conf
   graft version                print the version
   graft help                   this text
@@ -77,6 +78,7 @@ options:
       --rescan        ignore the discovery cache
       --only NAME     only links whose destination is named NAME
       --force         replace foreign symlinks (never tracked files)
+      --verify PATH   marker file for the target that add writes
   -q, --quiet         errors only
       --json          machine-readable output, implies --no-input
       --no-color      no ANSI colour (also honours NO_COLOR)
@@ -106,12 +108,13 @@ GRAFT_ONLY="" # newline-separated destination basenames
 GRAFT_CONF_ARG=""
 GRAFT_RESCAN=0
 GRAFT_FORCE=0
-GRAFT_ADOPT_AS=""
+GRAFT_AS=""
+GRAFT_ADD_VERIFY=""
 GRAFT_NO_COLOR=0
 
 graft_is_command() {
 	case "$1" in
-	link | status | check | unlink | adopt | init | version | help) return 0 ;;
+	link | status | check | unlink | adopt | add | init | version | help) return 0 ;;
 	esac
 	return 1
 }
@@ -161,10 +164,16 @@ graft_parse_args() {
 		--only=*) GRAFT_ONLY="$GRAFT_ONLY${a#--only=}"$'\n' ;;
 		--as)
 			[ $# -ge 2 ] || gr_die "$GRAFT_EX_USAGE" "--as needs a target name"
-			GRAFT_ADOPT_AS="$2"
+			GRAFT_AS="$2"
 			shift
 			;;
-		--as=*) GRAFT_ADOPT_AS="${a#--as=}" ;;
+		--as=*) GRAFT_AS="${a#--as=}" ;;
+		--verify)
+			[ "$#" -ge 2 ] || gr_die "$GRAFT_EX_USAGE" "--verify needs a path"
+			GRAFT_ADD_VERIFY="$2"
+			shift
+			;;
+		--verify=*) GRAFT_ADD_VERIFY="${a#--verify=}" ;;
 		--)
 			shift
 			while [ $# -gt 0 ]; do
@@ -301,6 +310,10 @@ main() {
 	adopt)
 		graft_need_config
 		plan_cmd_adopt
+		;;
+	add)
+		graft_need_config
+		plan_cmd_add
 		;;
 	init)
 		plan_cmd_init
