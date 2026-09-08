@@ -133,24 +133,23 @@ before the fix.
 
 ## Commits and pull requests
 
-We use [Conventional Commits][cc]:
+One subject line that says what changed, prefixed with `graft:`:
 
 ```
-feat(discover): add origin-re strategy
-fix(apply): ask -L before -e when classifying a destination
-docs(readme): show a realistic second run
-test(link): cover paths containing spaces
-chore(ci): pin bats to v1.11.0
-refactor(config): ...   perf(discover): ...   build: ...   ci: ...
+graft: add the origin-re discovery strategy
+graft: ask -L before -e when classifying a destination
+graft: cover paths containing spaces
+graft: pin bats in CI so a release cannot turn a green PR red
 ```
 
-- Scopes match the module: `core`, `config`, `discover`, `state`, `plan`,
-  `apply`, `cli`, `install`, `ci`, `docs`.
-- Subject line in the imperative, lower case, no trailing period, aim for 72
-  characters.
-- Breaking changes: `feat(config)!: ...` plus a `BREAKING CHANGE:` footer
-  explaining the migration.
-- The body says *why*. The diff already says what.
+- Subject in the imperative, lower case, no trailing period, aim for 72
+  characters. `git log --oneline` should read as a list of changes.
+- Breaking changes say so in the subject and explain the migration in the body.
+- The body says *why*, in full sentences. The diff already says what.
+
+The history is deliberately free of `feat:`/`fix:` prefixes and of scopes: the
+subject already carries the meaning, and a one-module project gains nothing
+from a taxonomy.
 
 For the pull request itself: keep it to one topic, make sure `make check`
 passes, and describe how you verified the change - "reproduced in a scratch
@@ -188,4 +187,3 @@ a deprecation cycle.
 [shellcheck]: https://www.shellcheck.net/
 [shfmt]: https://github.com/mvdan/sh
 [bats-core]: https://github.com/bats-core/bats-core
-[cc]: https://www.conventionalcommits.org/en/v1.0.0/
