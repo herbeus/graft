@@ -49,6 +49,60 @@ The awkward part is not creating a symlink. It is:
 graft is a single dependency-free bash program that does those four things and
 nothing else.
 
+## Do you even need this?
+
+Very often: no. Be honest about your situation first.
+
+**If you are one person with three checkouts that all live in `~/projects/`,
+you do not need graft.** You need ten lines of Makefile, and here they are:
+
+```make
+CONTEXT := $(HOME)/context
+REPOS   := $(HOME)/projects/web-app $(HOME)/projects/api $(HOME)/projects/docs
+
+.PHONY: link
+link:
+	@for r in $(REPOS); do \
+	  n=$$(basename $$r); \
+	  ln -sfn $(CONTEXT)/$$n $$r/.github; \
+	  grep -qxF .github $$r/.git/info/exclude 2>/dev/null \
+	    || echo .github >> $$r/.git/info/exclude; \
+	  echo "linked $$r/.github"; \
+	done
+```
+
+That is a real, working solution. `ln -sfn` even avoids the classic bug where
+`ln -s` onto an existing directory symlink puts the link *inside* the directory.
+Use it. GNU Stow does the same job with fewer of your own bugs
+(`stow -d ~/context -t ~/projects/web-app web-app`), and `docs/comparison.md`
+compares both properly.
+
+Here is where those ten lines start to hurt, in the order it usually happens:
+
+1. **More than about five repositories.** `REPOS` becomes a list you maintain by
+   hand and forget to update. Discovery by remote URL removes the list.
+2. **More than one person.** The moment you want to *commit* the configuration
+   so a colleague can use it, absolute paths are wrong. `~/projects/api` on your
+   machine is `~/src/work/api` on theirs. This is the single biggest reason the
+   Makefile stops scaling: it cannot be shared.
+3. **More than one machine.** Same problem as more than one person, plus a
+   laptop where the API repo genuinely is somewhere else.
+4. **More than one agent tool.** One `.github` link becomes `.github` plus
+   `CLAUDE.md` plus `.cursor/rules` plus `AGENTS.md`, per repo, with different
+   subsets per repo. The `for` loop grows a `case`.
+5. **The first time it eats something.** `ln -sfn` happily replaces a symlink
+   that pointed somewhere you cared about, and it will fail confusingly on a
+   real directory. There is no backup and no undo. When a repository already
+   tracks `.github/`, the loop above creates a diff that deletes it and you find
+   out in code review, if you are lucky.
+6. **When you want it gone.** Uninstalling the Makefile approach means
+   remembering every path you ever ran it against. `graft unlink` reads its own
+   state file, verifies each path against the filesystem, restores your backups
+   and removes the exclude blocks it wrote.
+
+If none of 1-6 apply to you, close this tab and write the Makefile. That is a
+sincere recommendation, and it is why `docs/comparison.md` exists.
+
 ## Quickstart
 
 ```sh
@@ -199,24 +253,14 @@ Reading it back:
 - `[setup]` entries are **printed** after a successful run. graft never runs
   them. That is not an oversight, it is the point.
 
-Four more keys are worth knowing about, because each changes what a run does:
+Four more keys change what a run does:
 
-- `description = ...` on a target is not decoration: `graft status` groups its
-  output by target and prints this line above each group.
-- `confirm = yes` on a target makes graft ask before it changes anything for
-  that target - once per run, not once per link. Answer no and you get
-  `- <target>: skipped on request`.
-- `on_foreign_link = abort` (default `warn`). A destination that is already a
-  symlink pointing outside your context repo is somebody's decision. `warn`
-  reports it, leaves it alone and links everything else; `abort` refuses the
-  entire run so that nothing is half-applied. `--force` overrides both, and
-  moves the foreign link to a backup rather than deleting it.
-- `backup_suffix = .graft-backup` in `[defaults]` names every backup graft
-  makes. With `backup = suffix` you get `CLAUDE.md.graft-backup`; with
-  `backup = timestamp` (the default) you get
-  `CLAUDE.md.graft-backup.20260828T075903Z`. `backup = abort` refuses instead of
-  moving anything aside. `graft unlink` finds the backups by that same suffix,
-  so change it in `[defaults]` and leave it alone afterwards.
+| key | effect |
+|---|---|
+| `description` | `graft status` groups by target and prints this above each group |
+| `confirm = yes` | ask before touching this target - once per run, not per link |
+| `on_foreign_link` | `warn` (default) reports a symlink pointing outside your context repo and moves on; `abort` refuses the whole run. `--force` overrides both and backs the link up rather than deleting it |
+| `backup_suffix` | names every backup. With `backup = timestamp` (default) you get `CLAUDE.md.graft-backup.20260828T075903Z`; `backup = abort` refuses instead of moving anything aside. `unlink` finds backups by this suffix, so set it once and leave it alone |
 
 After a run that moved something aside, graft says where it went, because the
 exclude block hides backups from `git status`:
@@ -268,24 +312,11 @@ graft could not find), `--rescan` (ignore the discovery cache), `--only NAME`
 (replace foreign symlinks, never tracked files), `--json` (JSON Lines, for
 scripts), `-q`, `--no-color`.
 
-`graft unlink` is symmetrical with the rest: `--dry-run` prints
-`- would remove <path>` lines and a `N links would be removed` summary without
-touching anything, `--only` restricts it to one destination name, and it works
-even when the state file is gone. In that case it falls back to what it can
-still recognise on disk - a symlink in a resolved checkout that points into your
-context repo - and says so:
-
-```
-$ graft unlink
-  ✓ ~/projects/web-app/.github  link removed (no state, matched by target)
-1 link removed
-```
-
-That fallback still restores a backup, but only when exactly one candidate next
-to the destination carries the configured `backup_suffix`. Two candidates, or
-one with a different suffix, and it removes the link and leaves them alone -
-guessing there would move a stranger's directory onto a path you are still
-using.
+`graft unlink` is symmetrical with the rest: `--dry-run`, `--only` and a
+fallback for the case where the state file is gone - it then recognises links
+by what is still visible on disk and says so. It restores a backup only when
+exactly one candidate carries the configured suffix; guessing there would move
+a stranger's directory onto a path you are still using.
 
 Three environment variables, all of which have a flag equivalent:
 
@@ -308,32 +339,11 @@ condition:
 | 130 | interrupted (`Ctrl-C`) |
 
 Exit 4 means "do not bother re-running until you have changed something outside
-graft", and it has exactly four causes: a destination directory on a filesystem
-that cannot hold symlinks, a destination directory graft is not allowed to write
-in, an `adopt` whose copy or move failed on I/O, and a broken installation where
-`bin/graft` cannot find its own `lib/`. graft probes the two filesystem cases
-per directory, before it creates anything, and tells them apart on purpose -
-they send you off to fix two completely different things:
-
-```
-$ graft link --yes
-plan
-  + ~/mnt/exfat/repo/.github  (media)
-graft: the filesystem at /home/you/mnt/exfat/repo does not support symlinks
-      graft needs POSIX symlinks; exFAT, some network mounts and
-      Windows without Developer Mode cannot provide them
-```
-
-```
-$ graft link --yes
-plan
-  + ~/srv/shared/repo/.github  (shared)
-graft: cannot write in /home/you/srv/shared/repo
-      check the directory permissions, then run graft again
-```
-
-Everything else that goes wrong on disk is drift, not environment: a link that
-fails for any other reason is reported as `failed` and makes the run exit 1.
+graft": a filesystem that cannot hold symlinks, a directory graft may not write
+in, an `adopt` that failed on I/O, or a broken installation. graft probes the two
+filesystem cases per directory *before* it creates anything and names which of
+the two it is, because they send you off to fix different things. Everything else
+that goes wrong on disk is drift, not environment, and exits 1.
 
 ## How discovery works
 
@@ -516,60 +526,6 @@ It also refuses if that source path is already occupied
 (`already present in the context repo` - merging two versions is your call), if
 the path is already a symlink, or if it is not inside a git checkout at all.
 `--dry-run` prints the plan and stops.
-
-## Do you even need this?
-
-Very often: no. Be honest about your situation first.
-
-**If you are one person with three checkouts that all live in `~/projects/`,
-you do not need graft.** You need ten lines of Makefile, and here they are:
-
-```make
-CONTEXT := $(HOME)/context
-REPOS   := $(HOME)/projects/web-app $(HOME)/projects/api $(HOME)/projects/docs
-
-.PHONY: link
-link:
-	@for r in $(REPOS); do \
-	  n=$$(basename $$r); \
-	  ln -sfn $(CONTEXT)/$$n $$r/.github; \
-	  grep -qxF .github $$r/.git/info/exclude 2>/dev/null \
-	    || echo .github >> $$r/.git/info/exclude; \
-	  echo "linked $$r/.github"; \
-	done
-```
-
-That is a real, working solution. `ln -sfn` even avoids the classic bug where
-`ln -s` onto an existing directory symlink puts the link *inside* the directory.
-Use it. GNU Stow does the same job with fewer of your own bugs
-(`stow -d ~/context -t ~/projects/web-app web-app`), and `docs/comparison.md`
-compares both properly.
-
-Here is where those ten lines start to hurt, in the order it usually happens:
-
-1. **More than about five repositories.** `REPOS` becomes a list you maintain by
-   hand and forget to update. Discovery by remote URL removes the list.
-2. **More than one person.** The moment you want to *commit* the configuration
-   so a colleague can use it, absolute paths are wrong. `~/projects/api` on your
-   machine is `~/src/work/api` on theirs. This is the single biggest reason the
-   Makefile stops scaling: it cannot be shared.
-3. **More than one machine.** Same problem as more than one person, plus a
-   laptop where the API repo genuinely is somewhere else.
-4. **More than one agent tool.** One `.github` link becomes `.github` plus
-   `CLAUDE.md` plus `.cursor/rules` plus `AGENTS.md`, per repo, with different
-   subsets per repo. The `for` loop grows a `case`.
-5. **The first time it eats something.** `ln -sfn` happily replaces a symlink
-   that pointed somewhere you cared about, and it will fail confusingly on a
-   real directory. There is no backup and no undo. When a repository already
-   tracks `.github/`, the loop above creates a diff that deletes it and you find
-   out in code review, if you are lucky.
-6. **When you want it gone.** Uninstalling the Makefile approach means
-   remembering every path you ever ran it against. `graft unlink` reads its own
-   state file, verifies each path against the filesystem, restores your backups
-   and removes the exclude blocks it wrote.
-
-If none of 1-6 apply to you, close this tab and write the Makefile. That is a
-sincere recommendation, and it is why `docs/comparison.md` exists.
 
 ## Works with AGENTS.md, rulesync and ruler
 
