@@ -37,7 +37,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # shellcheck is preinstalled on the GitHub ubuntu images, but only in
       # whatever version that image happens to carry - 0.9.0 in September 2026.
@@ -80,7 +80,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: install bats-core
         run: |
@@ -101,7 +101,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # Checking out *inside* a `container:` built on Alpine does not work -
       # the runner injects a glibc node binary that musl cannot execute. So the
@@ -158,7 +158,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: install into a temporary prefix
         run: |

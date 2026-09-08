@@ -1,0 +1,10 @@
+# Keeps the actions used in CI current. graft itself has no dependencies -
+# it is bash and nothing else - so this watches the workflow only.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    commit-message:
+      prefix: "graft"
