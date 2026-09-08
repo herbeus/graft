@@ -1,15 +1,4 @@
-<!--
-TODO BEFORE PUBLISHING: replace CONTACT-METHOD-TODO below with a real,
-monitored contact method (a dedicated email address, or a private reporting
-form). A Code of Conduct with an unreachable reporting address is worse than
-none: it promises a process that does not exist. Do not tag a public release
-until this is set.
--->
-
 # Contributor Covenant Code of Conduct
-
-> **TODO: the reporting contact is still a placeholder** - see
-> [Enforcement](#enforcement) below.
 
 ## Our Pledge
 
@@ -72,8 +61,7 @@ representative at an online or offline event.
 Instances of abusive, harassing, or otherwise unacceptable behavior may be
 reported to the community leaders responsible for enforcement at:
 
-> **CONTACT-METHOD-TODO** - this placeholder must be replaced with a real,
-> monitored address before the first public release.
+> <k.tommy@gmail.com>
 
 All complaints will be reviewed and investigated promptly and fairly.
 
