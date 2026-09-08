@@ -1093,7 +1093,7 @@ EOF
 # It only ever appends. graft.conf is written by hand, commented and ordered on
 # purpose, so a command that rewrote it would cost the user more than it saves.
 plan_cmd_add() {
-	local dir name checkout pattern verify cand line src block rel
+	local dir name checkout pattern verify cand line src block rel dest
 	dir=""
 	while IFS= read -r line; do
 		[ -n "$line" ] || continue
@@ -1182,14 +1182,23 @@ EOF
 	[ -n "$verify" ] && gr_ok "verify = $verify (change it if that is the wrong marker)"
 	gr_ok "created $(gr_clean "$src")/"
 	gr_say ""
+	# Both sides of the link, because they differ by exactly one dot and that
+	# is the single most confusable thing in the whole config: the source in
+	# the context repo is `github`, the symlink in the checkout is `.github`.
 	gr_say "next: put the shared content in there. The inherited links expect:"
 	while IFS= read -r line; do
 		[ -n "$line" ] || continue
 		rel=${line%%-\>*}
-		# shellcheck disable=SC2001 # trimming both ends, sed is the clear way
+		case "$line" in
+		*-\>*) dest=${line#*-\>} ;;
+		*) dest=$rel ;;
+		esac
+		# shellcheck disable=SC2001 # trimming one end each, sed is the clear way
 		rel=$(printf '%s' "$rel" | sed 's/[[:space:]]*$//')
+		# shellcheck disable=SC2001
+		dest=$(printf '%s' "$dest" | sed 's/^[[:space:]]*//')
 		[ -n "$rel" ] || continue
-		gr_say "      $(gr_clean "$src")/$rel"
+		gr_say "      $(gr_clean "$src")/$rel  ->  linked into the checkout as $dest"
 	done <<EOF
 $(cfg_get_all defaults link)
 EOF

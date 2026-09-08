@@ -1272,6 +1272,10 @@ EOF
 	run "$GRAFT" -C "$CTX/graft.conf" add
 	assert_status 0
 	assert_output_contains "origin:*git.example.com/acme/payments-api"
+	# Both sides of the inherited link, because they differ by one dot: the
+	# source in the context repo is github, the symlink in the checkout .github.
+	assert_output_contains "projects/payments-api/github"
+	assert_output_contains "as .github"
 
 	cd "$CTX" || return 1
 	run "$GRAFT" link --yes payments-api
