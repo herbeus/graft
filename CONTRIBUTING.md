@@ -171,7 +171,7 @@ Maintainers only. Releases are cut from `main`:
    `## [X.Y.Z] - YYYY-MM-DD` heading, and add the link reference at the bottom.
 3. Bump `GRAFT_VERSION` in `bin/graft` and `VERSION` in `install.sh` and
    `uninstall.sh` to the same number.
-4. Commit as `chore(release): X.Y.Z`.
+4. Commit as `graft: release X.Y.Z`.
 5. Tag: `git tag -a vX.Y.Z -m 'graft X.Y.Z'` and push the tag.
 6. Create the GitHub release, pasting the changelog section as the body. There
    is no build artefact to upload - the tarball GitHub generates is the release.

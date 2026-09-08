@@ -14,12 +14,9 @@ will not change without a deprecation notice: the **exit codes** and the
 
 Nothing yet.
 
-## [0.1.0] - unreleased
+## [0.1.0] - 2026-09-08
 
-The first version. `graft --version`, `install.sh` and `uninstall.sh` all report
-`0.1.0` already; there is no `v0.1.0` tag yet. Cutting the release means giving
-the heading above a date and pushing the tag - the checklist is in
-`CONTRIBUTING.md`, "Releasing".
+The first version.
 
 ### Added
 
@@ -76,5 +73,5 @@ the heading above a date and pushing the tag - the checklist is in
 - Test suite (bats-core) that runs entirely inside a sandboxed `$HOME`, plus CI
   on Linux, macOS and bash 3.2.
 
-[Unreleased]: https://github.com/herbeus/graft/commits/main
-[0.1.0]: https://github.com/herbeus/graft/commits/main
+[Unreleased]: https://github.com/herbeus/graft/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/herbeus/graft/releases/tag/v0.1.0
