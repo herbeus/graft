@@ -1,0 +1,34 @@
+name: Feature request
+description: Suggest something graft should do
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        graft has explicit non-goals, and they are not oversights - see
+        "Scope: what graft will not become" in CONTRIBUTING.md. No content transformation,
+        no code execution, no network access, no `$HOME` dotfile management,
+        no native Windows support.
+
+        A request that crosses one of those lines will be closed with a pointer,
+        not because it is a bad idea, but because it belongs in a different tool.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What are you trying to do, and where does graft get in the way?
+    validations:
+      required: true
+
+  - type: textarea
+    id: today
+    attributes:
+      label: How you solve it today
+      description: The workaround, however ugly. It says more than a proposed flag.
+
+  - type: textarea
+    id: idea
+    attributes:
+      label: What you have in mind
+      description: Optional. A rough shape is enough.

@@ -1,0 +1,53 @@
+name: Bug report
+description: graft behaves differently from what the docs say
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        `docs/SPEC.md` is the contract. If the tool disagrees with it, that is a bug
+        and the SPEC line is the best thing you can quote.
+
+        **A `graft.conf` usually contains the URLs of the repositories you work on.**
+        Redact anything you would not put on a postcard - organisation names,
+        internal hosts, checkout paths. Nothing here needs the real names to be
+        reproducible.
+
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you ran, what you expected, what you got instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: config
+    attributes:
+      label: The relevant part of graft.conf
+      description: The target and defaults involved, redacted.
+      render: ini
+
+  - type: textarea
+    id: output
+    attributes:
+      label: Output
+      description: |
+        `graft status` or the failing command. Add the exit code - graft
+        distinguishes 1 (drift), 2 (usage), 3 (unconfirmed) and 4 (environment).
+      render: text
+
+  - type: input
+    id: version
+    attributes:
+      label: graft --version
+    validations:
+      required: true
+
+  - type: input
+    id: platform
+    attributes:
+      label: OS and shell
+      description: "e.g. macOS 15 with /bin/bash 3.2, or Ubuntu 24.04 with bash 5.2"
+    validations:
+      required: true
