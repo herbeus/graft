@@ -4,7 +4,7 @@
 
 Please report security issues through **private GitHub Security Advisories**:
 
-<https://github.com/OWNER/graft/security/advisories/new>
+<https://github.com/herbeus/graft/security/advisories/new>
 
 Do not open a public issue for a vulnerability. You should get a first response
 within seven days. If a fix is warranted, it ships in a patch release and the

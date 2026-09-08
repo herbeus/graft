@@ -144,7 +144,7 @@ if [ ! -f "$SRC" ]; then
 install.sh must run from inside a graft checkout, next to bin/graft.
 If you copied this script somewhere on its own, clone the repository instead:
 
-    git clone https://github.com/OWNER/graft.git
+    git clone https://github.com/herbeus/graft.git
     cd graft && ./install.sh"
 fi
 [ -x "$SRC" ] || die "$SRC is not executable. Run: chmod +x '$SRC'"

@@ -76,5 +76,5 @@ the heading above a date and pushing the tag - the checklist is in
 - Test suite (bats-core) that runs entirely inside a sandboxed `$HOME`, plus CI
   on Linux, macOS and bash 3.2.
 
-[Unreleased]: https://github.com/OWNER/graft/commits/main
-[0.1.0]: https://github.com/OWNER/graft/commits/main
+[Unreleased]: https://github.com/herbeus/graft/commits/main
+[0.1.0]: https://github.com/herbeus/graft/commits/main

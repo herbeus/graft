@@ -1,11 +1,9 @@
-<!-- Replace OWNER with your GitHub account or organisation before publishing. -->
-
 # graft
 
 **One shared directory of AI-agent context, linked into every repository you
 work on - found by git remote URL, not by hardcoded path.**
 
-[![CI](https://github.com/OWNER/graft/actions/workflows/ci.yml/badge.svg)](https://github.com/OWNER/graft/actions/workflows/ci.yml)
+[![CI](https://github.com/herbeus/graft/actions/workflows/ci.yml/badge.svg)](https://github.com/herbeus/graft/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Shell: bash 3.2+](https://img.shields.io/badge/shell-bash%203.2%2B-lightgrey.svg)](#requirements)
 [![Dependencies: none](https://img.shields.io/badge/dependencies-none-brightgreen.svg)](#requirements)
@@ -54,7 +52,7 @@ nothing else.
 ## Quickstart
 
 ```sh
-git clone https://github.com/OWNER/graft.git ~/.local/share/graft
+git clone https://github.com/herbeus/graft.git ~/.local/share/graft
 ~/.local/share/graft/install.sh          # one symlink into ~/.local/bin, no sudo
 
 cd ~/context                             # your repo of shared agent context

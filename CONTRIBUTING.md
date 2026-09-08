@@ -37,7 +37,7 @@ You need `bash`, `git`, [shellcheck][], [shfmt][] and [bats-core][]. There is no
 build step: `bin/graft` runs straight from the checkout.
 
 ```sh
-git clone https://github.com/OWNER/graft.git
+git clone https://github.com/herbeus/graft.git
 cd graft
 make help          # list the targets
 make check         # lint + format check + tests. This is exactly what CI runs.

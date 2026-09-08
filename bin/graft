@@ -2,7 +2,7 @@
 #
 # graft - link one shared AI-agent context repo into many project checkouts.
 #
-# https://github.com/OWNER/graft
+# https://github.com/herbeus/graft
 # SPDX-License-Identifier: MIT
 #
 # This file owns argument parsing, dispatch and every headline printed to the
@@ -93,7 +93,7 @@ environment:
   NO_COLOR       disable colour, same as --no-color
   CI             any value implies --no-input
 
-full documentation: docs/ in the repo, or https://github.com/OWNER/graft
+full documentation: docs/ in the repo, or https://github.com/herbeus/graft
 USAGE
 }
 
