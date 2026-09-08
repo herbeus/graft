@@ -82,7 +82,7 @@ That run, with `$demo` shown as `/tmp/demo`, prints:
 ```
 $ graft -C "$demo/context/graft.conf" check
 graft.conf: /tmp/demo/context/graft.conf
-  ✓ syntax and schema are valid
+  ✓ syntax, schema and sources are all in order
   3 targets, 1 setup note
 
 $ graft -C "$demo/context/graft.conf" link --yes
