@@ -26,9 +26,10 @@ concurrency:
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 env:
-  # Pinned so a bats release cannot turn a green PR red overnight.
+  # Pinned so a tool release cannot turn a green PR red overnight.
   BATS_VERSION: v1.11.0
   SHFMT_VERSION: v3.8.0
+  SHELLCHECK_VERSION: v0.11.0
 
 jobs:
   lint:
@@ -38,13 +39,25 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # shellcheck is preinstalled on the GitHub ubuntu images.
+      # shellcheck is preinstalled on the GitHub ubuntu images, but only in
+      # whatever version that image happens to carry - 0.9.0 in September 2026.
+      # Older versions warn about things newer ones deliberately no longer do
+      # (SC2120 on disc_index_load, for one), so a green local run turned red
+      # here for no change in the code. Pin it like bats and shfmt instead of
+      # depending on the image.
+      - name: install shellcheck
+        run: |
+          url="https://github.com/koalaman/shellcheck/releases/download"
+          url="$url/${SHELLCHECK_VERSION}/shellcheck-${SHELLCHECK_VERSION}.linux.x86_64.tar.xz"
+          curl -fsSL "$url" | tar -xJ -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/shellcheck-${SHELLCHECK_VERSION}" >>"$GITHUB_PATH"
+
       - name: shellcheck
         run: |
           shellcheck --version
           make lint
 
-      # shfmt is not. `go` is, so install the pinned version with it.
+      # shfmt is not on the image at all. `go` is, so install the pinned version.
       # Alternative if the toolchain ever disappears from the image:
       #   sudo apt-get update && sudo apt-get install -y shfmt
       # (Ubuntu ships an older shfmt, so the pinned go install is preferred.)
